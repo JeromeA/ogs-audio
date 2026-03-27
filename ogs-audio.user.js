@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.5
+// @version      0.1.6
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -29,6 +29,7 @@
   let lastLoggedCoordinate = null;
   let lastLoggedGridSignature = null;
   let lastLoggedSvgFailure = null;
+  let lastLoggedSvgCandidateSignature = null;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -395,42 +396,107 @@
     return best;
   }
 
-  function getBoardSvg(boardSurface) {
-    if (boardSurface instanceof SVGSVGElement) {
-      return boardSurface;
+  function getSvgClassName(svg) {
+    if (!(svg instanceof SVGSVGElement)) {
+      return '';
     }
 
-    if (!(boardSurface instanceof Element)) {
-      return null;
+    const className = svg.className;
+    if (typeof className === 'string') {
+      return className;
     }
 
-    if (typeof boardSurface.closest === 'function') {
-      const closestSvg = boardSurface.closest('svg');
+    if (className && typeof className.baseVal === 'string') {
+      return className.baseVal;
+    }
+
+    return '';
+  }
+
+  function collectBoardSvgCandidates(source, list, reason) {
+    if (!(source instanceof Element)) {
+      return;
+    }
+
+    if (source instanceof SVGSVGElement) {
+      list.push({ svg: source, reason });
+    }
+
+    if (typeof source.closest === 'function') {
+      const closestSvg = source.closest('svg');
       if (closestSvg instanceof SVGSVGElement) {
-        return closestSvg;
+        list.push({ svg: closestSvg, reason: `${reason}-closest` });
       }
     }
 
-    return boardSurface.querySelector('svg');
+    const nestedSvgs = source.querySelectorAll('svg');
+    for (const svg of nestedSvgs) {
+      if (svg instanceof SVGSVGElement) {
+        list.push({ svg, reason: `${reason}-descendant` });
+      }
+    }
+  }
+
+  function describeSvgCandidate(svg, reason) {
+    const rect = svg.getBoundingClientRect();
+    return {
+      reason,
+      id: svg.id || null,
+      className: getSvgClassName(svg),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      area: Math.round(rect.width * rect.height),
+      viewBox: svg.getAttribute('viewBox') || null
+    };
   }
 
   function getPointerBoardSvg(pointerTarget, clientX, clientY, boardSurface) {
-    const directSvg = getBoardSvg(pointerTarget);
-    if (directSvg) {
-      return directSvg;
-    }
+    const rawCandidates = [];
+    collectBoardSvgCandidates(pointerTarget, rawCandidates, 'pointer-target');
 
     if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof document.elementsFromPoint === 'function') {
       const stack = document.elementsFromPoint(clientX, clientY);
-      for (const element of stack) {
-        const stackedSvg = getBoardSvg(element);
-        if (stackedSvg) {
-          return stackedSvg;
-        }
+      for (let index = 0; index < stack.length; index += 1) {
+        collectBoardSvgCandidates(stack[index], rawCandidates, `elementsFromPoint-${index}`);
       }
     }
 
-    return getBoardSvg(boardSurface);
+    collectBoardSvgCandidates(boardSurface, rawCandidates, 'board-surface');
+
+    const seen = new Set();
+    const described = [];
+    let bestSvg = null;
+    let bestArea = -1;
+
+    for (const entry of rawCandidates) {
+      const svg = entry.svg;
+      if (!(svg instanceof SVGSVGElement) || seen.has(svg)) {
+        continue;
+      }
+      seen.add(svg);
+
+      const rect = svg.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      described.push(describeSvgCandidate(svg, entry.reason));
+      if (area > bestArea) {
+        bestArea = area;
+        bestSvg = svg;
+      }
+    }
+
+    const signature = described
+      .map((candidate) => `${candidate.reason}:${candidate.width}x${candidate.height}:${candidate.viewBox || ''}`)
+      .join('|');
+    if (signature !== lastLoggedSvgCandidateSignature) {
+      lastLoggedSvgCandidateSignature = signature;
+      log('getPointerBoardSvg candidates', {
+        candidateCount: described.length,
+        selected: bestSvg ? describeSvgCandidate(bestSvg, 'selected') : null,
+        candidates: described
+      });
+    }
+
+    return bestSvg;
   }
 
   function getSvgCoordinateSpace(svg) {
