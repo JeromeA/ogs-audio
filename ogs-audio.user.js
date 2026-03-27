@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.2
+// @version      0.1.3
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -26,6 +26,8 @@
   let activeHoverUtterance = null;
   let activeHoverAnnouncement = null;
   const recentLocalMoves = [];
+  let lastBoardSurfaceSignature = null;
+  let lastLoggedCoordinate = null;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -41,13 +43,12 @@
   }
 
   function logFunction(name, details) {
-    log(`${name}()`, details);
+    void name;
+    void details;
   }
 
   function speak(text) {
-    logFunction('speak', { text });
     if (typeof speechSynthesis === 'undefined' || !text) {
-      log('speak skipped', { hasSpeechSynthesis: typeof speechSynthesis !== 'undefined', text });
       return;
     }
 
@@ -56,9 +57,7 @@
   }
 
   function speakHoverAnnouncement(message) {
-    logFunction('speakHoverAnnouncement', { message });
     if (typeof speechSynthesis === 'undefined' || !message) {
-      log('speakHoverAnnouncement skipped', { hasSpeechSynthesis: typeof speechSynthesis !== 'undefined', message });
       return;
     }
 
@@ -66,14 +65,12 @@
     activeHoverUtterance = msg;
     activeHoverAnnouncement = message;
     msg.addEventListener('end', () => {
-      log('hover utterance ended', { message });
       if (activeHoverUtterance === msg) {
         activeHoverUtterance = null;
         activeHoverAnnouncement = null;
       }
     });
     msg.addEventListener('error', () => {
-      log('hover utterance errored', { message });
       if (activeHoverUtterance === msg) {
         activeHoverUtterance = null;
         activeHoverAnnouncement = null;
@@ -83,10 +80,6 @@
   }
 
   function cancelHoverUtteranceIfLeaving(message) {
-    logFunction('cancelHoverUtteranceIfLeaving', {
-      message,
-      activeHoverAnnouncement
-    });
     if (
       typeof speechSynthesis === 'undefined' ||
       !activeHoverUtterance ||
@@ -102,7 +95,6 @@
   }
 
   function clearPendingHoverAnnouncement() {
-    logFunction('clearPendingHoverAnnouncement', { pendingHoverAnnouncement, hoverTimerId });
     pendingHoverAnnouncement = null;
 
     if (hoverTimerId !== null) {
@@ -125,7 +117,6 @@
   }
 
   function decodeSgfPoint(point) {
-    logFunction('decodeSgfPoint', { point });
     if (typeof point !== 'string') {
       return null;
     }
@@ -151,7 +142,6 @@
   }
 
   function normalizeCoordinate(value) {
-    logFunction('normalizeCoordinate', { value });
     if (value == null) {
       return null;
     }
@@ -177,7 +167,6 @@
   }
 
   function coordinateFromXY(x, y) {
-    logFunction('coordinateFromXY', { x, y, boardSize: getBoardSize() });
     if (!Number.isInteger(x) || !Number.isInteger(y)) {
       return null;
     }
@@ -191,7 +180,6 @@
   }
 
   function rememberLocalMove(coordinate) {
-    logFunction('rememberLocalMove', { coordinate });
     if (!coordinate) {
       return;
     }
@@ -202,30 +190,18 @@
   }
 
   function pruneRecentLocalMoves(now = Date.now()) {
-    logFunction('pruneRecentLocalMoves', { now, countBefore: recentLocalMoves.length });
     while (recentLocalMoves.length > 0 && now - recentLocalMoves[0].at > LOCAL_MOVE_MEMORY_MS) {
       recentLocalMoves.shift();
     }
-    log('pruneRecentLocalMoves result', { countAfter: recentLocalMoves.length });
   }
 
   function isRecentLocalMove(coordinate) {
-    logFunction('isRecentLocalMove', { coordinate });
     pruneRecentLocalMoves();
     return recentLocalMoves.some((entry) => entry.coordinate === coordinate);
   }
 
   function announceRemoteMove(coordinate) {
-    logFunction('announceRemoteMove', {
-      coordinate,
-      lastAnnouncedRemoteMove
-    });
     if (!coordinate || coordinate === lastAnnouncedRemoteMove || isRecentLocalMove(coordinate)) {
-      log('announceRemoteMove skipped', {
-        coordinate,
-        lastAnnouncedRemoteMove,
-        recentLocal: coordinate ? isRecentLocalMove(coordinate) : null
-      });
       return;
     }
 
@@ -239,11 +215,6 @@
   }
 
   function maybeAnnounceHover(message) {
-    logFunction('maybeAnnounceHover', {
-      message,
-      lastHoverAnnouncement,
-      pendingHoverAnnouncement
-    });
     if (!message) {
       clearPendingHoverAnnouncement();
       return;
@@ -256,7 +227,6 @@
     clearPendingHoverAnnouncement();
     pendingHoverAnnouncement = message;
     hoverTimerId = window.setTimeout(() => {
-      log('hover settle timer fired', { message, pendingHoverAnnouncement });
       if (pendingHoverAnnouncement !== message) {
         return;
       }
@@ -278,7 +248,7 @@
   }
 
   function scoreBoardCandidate(element, rect) {
-    let score = rect.width * rect.height;
+    let score = 0;
     const lowerClass = String(element.className || '').toLowerCase();
     const lowerId = String(element.id || '').toLowerCase();
     const lowerRole = String(element.getAttribute?.('role') || '').toLowerCase();
@@ -302,6 +272,8 @@
     if (element.tagName === 'CANVAS' || element.tagName === 'SVG') {
       score += 10000;
     }
+
+    score -= rect.width * rect.height / 20;
 
     return score;
   }
@@ -347,18 +319,28 @@
     }
   }
 
+  function getReasonBonus(reason) {
+    if (reason.startsWith('pointer-target-self-')) {
+      return 120000;
+    }
+
+    if (reason.startsWith('pointer-target-')) {
+      return 90000;
+    }
+
+    if (reason.startsWith('elementsFromPoint-')) {
+      return 70000;
+    }
+
+    return 0;
+  }
+
   function findBoardSurface(clientX, clientY, pointerTarget) {
-    logFunction('findBoardSurface', {
-      clientX,
-      clientY,
-      pointerTarget: pointerTarget instanceof Element ? describeBoardCandidate(pointerTarget) : null
-    });
     const rawCandidates = [];
     collectAncestorCandidates(pointerTarget, rawCandidates, 'pointer-target');
 
     if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof document.elementsFromPoint === 'function') {
       const stack = document.elementsFromPoint(clientX, clientY);
-      log('elementsFromPoint stack', stack.slice(0, 8).map((element) => describeBoardCandidate(element)));
       for (let index = 0; index < stack.length; index += 1) {
         collectAncestorCandidates(stack[index], rawCandidates, `elementsFromPoint-${index}`);
       }
@@ -397,7 +379,7 @@
         continue;
       }
 
-      const score = scoreBoardCandidate(candidate, rect);
+      const score = scoreBoardCandidate(candidate, rect) + getReasonBonus(entry.reason);
       scoredCandidates.push({
         reason: entry.reason,
         score,
@@ -409,33 +391,35 @@
       }
     }
 
-    log('findBoardSurface result', {
-      rawCandidateCount: rawCandidates.length,
-      scoredCandidateCount: scoredCandidates.length,
-      topCandidates: scoredCandidates
-        .sort((left, right) => right.score - left.score)
-        .slice(0, 5),
-      bestTagName: best ? best.tagName : null,
-      bestId: best ? best.id : null,
-      bestClassName: best ? String(best.className || '') : null,
-      bestScore
-    });
+    const signature = best
+      ? `${best.tagName}:${best.id || ''}:${String(best.className || '')}:${Math.round(best.getBoundingClientRect().width)}`
+      : 'none';
+    if (signature !== lastBoardSurfaceSignature) {
+      lastBoardSurfaceSignature = signature;
+      log('findBoardSurface result', {
+        rawCandidateCount: rawCandidates.length,
+        scoredCandidateCount: scoredCandidates.length,
+        topCandidates: scoredCandidates
+          .sort((left, right) => right.score - left.score)
+          .slice(0, 5),
+        bestTagName: best ? best.tagName : null,
+        bestId: best ? best.id : null,
+        bestClassName: best ? String(best.className || '') : null,
+        bestScore
+      });
+    }
     return best;
   }
 
   function setBoardSize(value) {
-    logFunction('setBoardSize', { value, previousBoardSize: boardSize });
     if (!Number.isInteger(value) || value < 2 || value > MAX_BOARD_SIZE) {
-      log('setBoardSize rejected', { value });
       return;
     }
 
     boardSize = value;
-    log('boardSize updated', { boardSize });
   }
 
   function getBoardSize() {
-    logFunction('getBoardSize', { boardSize });
     if (boardSize) {
       return boardSize;
     }
@@ -446,7 +430,6 @@
       setBoardSize(Number.parseInt(match[1], 10));
     }
 
-    log('getBoardSize result', { boardSize: boardSize || 19 });
     return boardSize || 19;
   }
 
@@ -492,11 +475,6 @@
   }
 
   function getHoverAnnouncementFromPoint(clientX, clientY, pointerTarget) {
-    logFunction('getHoverAnnouncementFromPoint', {
-      clientX,
-      clientY,
-      pointerTarget: pointerTarget instanceof Element ? describeBoardCandidate(pointerTarget) : null
-    });
     const boardSurface = findBoardSurface(clientX, clientY, pointerTarget);
     if (!boardSurface) {
       log('getHoverAnnouncementFromPoint found no board surface');
@@ -514,12 +492,6 @@
     const localY = clientY - rect.top;
     const outsideMessage = getOutsideBoardMessage(localX, localY, rect);
     if (outsideMessage) {
-      log('getHoverAnnouncementFromPoint outside board', {
-        outsideMessage,
-        localX,
-        localY,
-        boardSurface: describeBoardCandidate(boardSurface)
-      });
       const hadRecentBoardAnnouncement =
         lastHoverAnnouncement !== null ||
         pendingHoverAnnouncement !== null ||
@@ -536,22 +508,21 @@
     const col = clamp(Math.round(localX / cellSize - 0.5), 0, size - 1);
     const row = clamp(Math.round(localY / cellSize - 0.5), 0, size - 1);
     const coordinate = toCoordinate(row, col, size);
-    log('getHoverAnnouncementFromPoint result', {
-      coordinate,
-      row,
-      col,
-      size,
-      cellSize,
-      boardSurface: describeBoardCandidate(boardSurface)
-    });
+    if (coordinate !== lastLoggedCoordinate) {
+      lastLoggedCoordinate = coordinate;
+      log('getHoverAnnouncementFromPoint result', {
+        coordinate,
+        row,
+        col,
+        size,
+        cellSize,
+        boardSurface: describeBoardCandidate(boardSurface)
+      });
+    }
     return coordinate;
   }
 
   function maybeRecordBoardSizeFromObject(value) {
-    logFunction('maybeRecordBoardSizeFromObject', {
-      width: value && value.width,
-      height: value && value.height
-    });
     if (!value || typeof value !== 'object') {
       return;
     }
@@ -564,9 +535,6 @@
   }
 
   function extractMoveCoordinate(payload) {
-    logFunction('extractMoveCoordinate', {
-      keys: payload && typeof payload === 'object' ? Object.keys(payload).slice(0, 12) : null
-    });
     if (!payload || typeof payload !== 'object') {
       return null;
     }
@@ -643,10 +611,6 @@
   }
 
   function analyzePayload(payload, direction) {
-    logFunction('analyzePayload', {
-      direction,
-      payloadType: Array.isArray(payload) ? 'array' : typeof payload
-    });
     walkPayload(payload, (value) => {
       maybeRecordBoardSizeFromObject(value);
       const coordinate = extractMoveCoordinate(value);
@@ -654,7 +618,6 @@
         return;
       }
 
-      log('analyzePayload found coordinate', { direction, coordinate, value });
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
       } else {
@@ -664,9 +627,6 @@
   }
 
   function parseSocketPayload(raw) {
-    logFunction('parseSocketPayload', {
-      rawPreview: typeof raw === 'string' ? raw.slice(0, 160) : raw
-    });
     if (typeof raw !== 'string') {
       return raw;
     }
@@ -678,22 +638,13 @@
 
     const candidate = raw.slice(firstJsonChar);
     try {
-      const parsed = JSON.parse(candidate);
-      log('parseSocketPayload parsed JSON', {
-        parsedType: Array.isArray(parsed) ? 'array' : typeof parsed
-      });
-      return parsed;
+      return JSON.parse(candidate);
     } catch (error) {
-      log('parseSocketPayload failed', { error: String(error) });
       return null;
     }
   }
 
   function analyzeRawText(raw, direction) {
-    logFunction('analyzeRawText', {
-      direction,
-      rawPreview: typeof raw === 'string' ? raw.slice(0, 200) : raw
-    });
     if (typeof raw !== 'string') {
       return;
     }
@@ -706,7 +657,6 @@
     const sgfMoveMatch = raw.match(/"move"\s*:\s*"([a-z]{2}|pass|\.\.)"/i);
     if (sgfMoveMatch) {
       const coordinate = normalizeCoordinate(sgfMoveMatch[1]);
-      log('analyzeRawText SGF move match', { direction, coordinate, match: sgfMoveMatch[0] });
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
       } else {
@@ -717,7 +667,6 @@
     const xyMatch = raw.match(/"x"\s*:\s*(-?\d+)[^]*?"y"\s*:\s*(-?\d+)/i);
     if (xyMatch) {
       const coordinate = coordinateFromXY(Number.parseInt(xyMatch[1], 10), Number.parseInt(xyMatch[2], 10));
-      log('analyzeRawText XY match', { direction, coordinate, match: xyMatch[0] });
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
       } else {
@@ -729,7 +678,6 @@
     if (boardSizeMatch) {
       const width = Number.parseInt(boardSizeMatch[1], 10);
       const height = Number.parseInt(boardSizeMatch[2], 10);
-      log('analyzeRawText board size match', { width, height });
       if (width === height) {
         setBoardSize(width);
       }
@@ -737,21 +685,14 @@
   }
 
   function installWebSocketHooks() {
-    logFunction('installWebSocketHooks');
     const NativeWebSocket = window.WebSocket;
     if (typeof NativeWebSocket !== 'function') {
-      log('installWebSocketHooks skipped: WebSocket unavailable');
       return;
     }
 
     window.WebSocket = function(...args) {
-      log('WebSocket constructor intercepted', { args });
       const socket = new NativeWebSocket(...args);
       socket.addEventListener('message', (event) => {
-        log('WebSocket message event', {
-          dataType: typeof event.data,
-          dataPreview: typeof event.data === 'string' ? event.data.slice(0, 200) : event.data
-        });
         if (typeof event.data === 'string') {
           analyzeRawText(event.data, 'incoming');
         }
@@ -759,10 +700,6 @@
 
       const nativeSend = socket.send;
       socket.send = function(data) {
-        log('WebSocket.send intercepted', {
-          dataType: typeof data,
-          dataPreview: typeof data === 'string' ? data.slice(0, 200) : data
-        });
         if (typeof data === 'string') {
           analyzeRawText(data, 'outgoing');
         }
@@ -774,19 +711,15 @@
 
     window.WebSocket.prototype = NativeWebSocket.prototype;
     Object.setPrototypeOf(window.WebSocket, NativeWebSocket);
-    log('installWebSocketHooks complete');
   }
 
   function installFetchHook() {
-    logFunction('installFetchHook');
     if (typeof window.fetch !== 'function') {
-      log('installFetchHook skipped: fetch unavailable');
       return;
     }
 
     const originalFetch = window.fetch;
     window.fetch = async function(...args) {
-      log('fetch intercepted', { args });
       const response = await originalFetch.apply(this, args);
 
       try {
@@ -796,12 +729,6 @@
           response.url.includes('/api/') ||
           response.url.includes('/termination-api/') ||
           response.url.includes('/game/');
-        log('fetch response received', {
-          url: response.url,
-          status: response.status,
-          contentType,
-          shouldInspect
-        });
         if (!shouldInspect) {
           return response;
         }
@@ -819,26 +746,18 @@
 
       return response;
     };
-    log('installFetchHook complete');
   }
 
   function installXhrHook() {
-    logFunction('installXhrHook');
     const originalOpen = XMLHttpRequest.prototype.open;
     const originalSend = XMLHttpRequest.prototype.send;
 
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      log('XMLHttpRequest.open intercepted', { method, url });
       this.__ogsAudioUrl = typeof url === 'string' ? url : '';
       return originalOpen.call(this, method, url, ...rest);
     };
 
     XMLHttpRequest.prototype.send = function(body) {
-      log('XMLHttpRequest.send intercepted', {
-        url: this.__ogsAudioUrl,
-        bodyType: typeof body,
-        bodyPreview: typeof body === 'string' ? body.slice(0, 200) : body
-      });
       if (typeof body === 'string') {
         analyzeRawText(body, 'outgoing');
       }
@@ -852,11 +771,6 @@
               this.responseURL.includes('/termination-api/') ||
               this.responseURL.includes('/game/')
             );
-          log('XMLHttpRequest load event', {
-            responseURL: this.responseURL,
-            status: this.status,
-            shouldInspect
-          });
           if (!shouldInspect) {
             return;
           }
@@ -869,19 +783,12 @@
 
       return originalSend.call(this, body);
     };
-    log('installXhrHook complete');
   }
 
   function installPointerHook() {
-    logFunction('installPointerHook');
     document.addEventListener(
       'pointermove',
       (event) => {
-        log('pointermove intercepted', {
-          clientX: event.clientX,
-          clientY: event.clientY,
-          targetTagName: event.target && event.target.tagName
-        });
         const message = getHoverAnnouncementFromPoint(event.clientX, event.clientY, event.target);
         if (!message) {
           cancelHoverUtteranceIfLeaving(null);
@@ -895,16 +802,10 @@
       },
       true
     );
-    log('installPointerHook complete');
   }
 
-  log('script boot', {
-    href: window.location.href,
-    readyState: document.readyState
-  });
   installWebSocketHooks();
   installFetchHook();
   installXhrHook();
   installPointerHook();
-  log('script initialized');
 })();

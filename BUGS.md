@@ -35,3 +35,14 @@ and could miss the actual board container entirely.
 The board lookup now starts from the hovered element, walks its ancestors, inspects `elementsFromPoint`, and only
 then falls back to broader board-like selectors. The logs now include the top scored candidates so failed matches are
 observable.
+
+## The first target-driven board candidate scoring still preferred containers that were too large
+
+The first refinement of the cursor-audio lookup did stop missing the board completely, but it still ranked some large
+board-adjacent containers above the actual playable surface.
+
+That produced coordinates that were consistently far from the hovered intersection because the math was using the
+wrong rectangle, even though the rectangle was square and near the pointer.
+
+The candidate scoring now strongly prefers smaller pointer-local square elements over large containers, while still
+keeping the candidate summary logs that help diagnose wrong picks.
