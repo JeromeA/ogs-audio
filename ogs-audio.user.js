@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.3
+// @version      0.1.4
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -26,8 +26,8 @@
   let activeHoverUtterance = null;
   let activeHoverAnnouncement = null;
   const recentLocalMoves = [];
-  let lastBoardSurfaceSignature = null;
   let lastLoggedCoordinate = null;
+  let lastLoggedGridSignature = null;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -391,24 +391,171 @@
       }
     }
 
-    const signature = best
-      ? `${best.tagName}:${best.id || ''}:${String(best.className || '')}:${Math.round(best.getBoundingClientRect().width)}`
-      : 'none';
-    if (signature !== lastBoardSurfaceSignature) {
-      lastBoardSurfaceSignature = signature;
-      log('findBoardSurface result', {
-        rawCandidateCount: rawCandidates.length,
-        scoredCandidateCount: scoredCandidates.length,
-        topCandidates: scoredCandidates
-          .sort((left, right) => right.score - left.score)
-          .slice(0, 5),
-        bestTagName: best ? best.tagName : null,
-        bestId: best ? best.id : null,
-        bestClassName: best ? String(best.className || '') : null,
-        bestScore
+    return best;
+  }
+
+  function getBoardSvg(boardSurface) {
+    if (boardSurface instanceof SVGSVGElement) {
+      return boardSurface;
+    }
+
+    if (!(boardSurface instanceof Element)) {
+      return null;
+    }
+
+    return boardSurface.querySelector('svg');
+  }
+
+  function getSvgCoordinateSpace(svg) {
+    const viewBox = svg.viewBox && svg.viewBox.baseVal;
+    if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
+      return {
+        width: viewBox.width,
+        height: viewBox.height
+      };
+    }
+
+    const width = Number.parseFloat(svg.getAttribute('width') || '');
+    const height = Number.parseFloat(svg.getAttribute('height') || '');
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height };
+    }
+
+    return null;
+  }
+
+  function parseGridSegmentsFromPathData(pathData) {
+    if (typeof pathData !== 'string' || pathData.length === 0) {
+      return [];
+    }
+
+    const segments = [];
+    const pattern = /M\s*([-\d.]+)\s+([-\d.]+)\s+L\s*([-\d.]+)\s+([-\d.]+)/g;
+    let match = null;
+
+    while ((match = pattern.exec(pathData)) !== null) {
+      segments.push({
+        x1: Number.parseFloat(match[1]),
+        y1: Number.parseFloat(match[2]),
+        x2: Number.parseFloat(match[3]),
+        y2: Number.parseFloat(match[4])
       });
     }
-    return best;
+
+    return segments.filter((segment) => (
+      Number.isFinite(segment.x1) &&
+      Number.isFinite(segment.y1) &&
+      Number.isFinite(segment.x2) &&
+      Number.isFinite(segment.y2)
+    ));
+  }
+
+  function uniqueSorted(values) {
+    return [...new Set(values.map((value) => Math.round(value * 1000) / 1000))].sort((left, right) => left - right);
+  }
+
+  function averageStep(values) {
+    if (!Array.isArray(values) || values.length < 2) {
+      return null;
+    }
+
+    let total = 0;
+    for (let index = 1; index < values.length; index += 1) {
+      total += values[index] - values[index - 1];
+    }
+
+    return total / (values.length - 1);
+  }
+
+  function parseGridMetricsFromSvg(svg) {
+    const coordinateSpace = getSvgCoordinateSpace(svg);
+    if (!coordinateSpace) {
+      return null;
+    }
+
+    let bestMetrics = null;
+    let bestScore = -1;
+    const paths = svg.querySelectorAll('path');
+    for (const path of paths) {
+      const pathData = path.getAttribute('d') || '';
+      const segments = parseGridSegmentsFromPathData(pathData);
+      if (segments.length < 4) {
+        continue;
+      }
+
+      const verticals = uniqueSorted(
+        segments
+          .filter((segment) => Math.abs(segment.x1 - segment.x2) < 0.001)
+          .map((segment) => segment.x1)
+      );
+      const horizontals = uniqueSorted(
+        segments
+          .filter((segment) => Math.abs(segment.y1 - segment.y2) < 0.001)
+          .map((segment) => segment.y1)
+      );
+
+      if (verticals.length < 2 || horizontals.length < 2 || verticals.length !== horizontals.length) {
+        continue;
+      }
+
+      const xStep = averageStep(verticals);
+      const yStep = averageStep(horizontals);
+      if (!xStep || !yStep) {
+        continue;
+      }
+
+      const score = verticals.length * horizontals.length;
+      if (score <= bestScore) {
+        continue;
+      }
+
+      bestScore = score;
+      bestMetrics = {
+        boardSize: verticals.length,
+        left: verticals[0],
+        right: verticals[verticals.length - 1],
+        top: horizontals[0],
+        bottom: horizontals[horizontals.length - 1],
+        xStep,
+        yStep,
+        verticals,
+        horizontals,
+        coordinateSpace
+      };
+    }
+
+    if (!bestMetrics) {
+      return null;
+    }
+
+    const signature = `${bestMetrics.boardSize}:${bestMetrics.left}:${bestMetrics.right}:${bestMetrics.top}:${bestMetrics.bottom}`;
+    if (signature !== lastLoggedGridSignature) {
+      lastLoggedGridSignature = signature;
+      log('parseGridMetricsFromSvg result', {
+        boardSize: bestMetrics.boardSize,
+        left: bestMetrics.left,
+        right: bestMetrics.right,
+        top: bestMetrics.top,
+        bottom: bestMetrics.bottom,
+        xStep: bestMetrics.xStep,
+        yStep: bestMetrics.yStep
+      });
+    }
+
+    return bestMetrics;
+  }
+
+  function nearestIndex(values, target) {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    for (let index = 0; index < values.length; index += 1) {
+      const distance = Math.abs(values[index] - target);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+    return bestIndex;
   }
 
   function setBoardSize(value) {
@@ -481,13 +628,58 @@
       return null;
     }
 
-    const size = getBoardSize();
-    const rect = boardSurface.getBoundingClientRect();
+    const boardSvg = getBoardSvg(boardSurface);
+    const activeSurface = boardSvg || boardSurface;
+    const rect = activeSurface.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
-      log('getHoverAnnouncementFromPoint invalid rect', describeBoardCandidate(boardSurface));
+      log('getHoverAnnouncementFromPoint invalid rect', describeBoardCandidate(activeSurface));
       return null;
     }
 
+    const svgMetrics = boardSvg ? parseGridMetricsFromSvg(boardSvg) : null;
+    if (svgMetrics) {
+      setBoardSize(svgMetrics.boardSize);
+      const svgX = (clientX - rect.left) * svgMetrics.coordinateSpace.width / rect.width;
+      const svgY = (clientY - rect.top) * svgMetrics.coordinateSpace.height / rect.height;
+      const leftBound = svgMetrics.left - svgMetrics.xStep / 2;
+      const rightBound = svgMetrics.right + svgMetrics.xStep / 2;
+      const topBound = svgMetrics.top - svgMetrics.yStep / 2;
+      const bottomBound = svgMetrics.bottom + svgMetrics.yStep / 2;
+      const outsideMessage = getOutsideBoardMessage(
+        svgX - leftBound,
+        svgY - topBound,
+        {
+          width: rightBound - leftBound,
+          height: bottomBound - topBound
+        }
+      );
+      if (outsideMessage) {
+        const hadRecentBoardAnnouncement =
+          lastHoverAnnouncement !== null ||
+          pendingHoverAnnouncement !== null ||
+          activeHoverAnnouncement !== null;
+        return hadRecentBoardAnnouncement ? outsideMessage : null;
+      }
+
+      const col = nearestIndex(svgMetrics.verticals, svgX);
+      const row = nearestIndex(svgMetrics.horizontals, svgY);
+      const coordinate = toCoordinate(row, col, svgMetrics.boardSize);
+      if (coordinate !== lastLoggedCoordinate) {
+        lastLoggedCoordinate = coordinate;
+        log('getHoverAnnouncementFromPoint result', {
+          coordinate,
+          row,
+          col,
+          boardSize: svgMetrics.boardSize,
+          svgX,
+          svgY,
+          boardSurface: describeBoardCandidate(activeSurface)
+        });
+      }
+      return coordinate;
+    }
+
+    const size = getBoardSize();
     const localX = clientX - rect.left;
     const localY = clientY - rect.top;
     const outsideMessage = getOutsideBoardMessage(localX, localY, rect);
@@ -501,7 +693,7 @@
 
     const cellSize = rect.width / size;
     if (cellSize <= 0) {
-      log('getHoverAnnouncementFromPoint invalid cell size', { cellSize, size, rect: describeBoardCandidate(boardSurface) });
+      log('getHoverAnnouncementFromPoint invalid cell size', { cellSize, size, rect: describeBoardCandidate(activeSurface) });
       return null;
     }
 
@@ -510,13 +702,13 @@
     const coordinate = toCoordinate(row, col, size);
     if (coordinate !== lastLoggedCoordinate) {
       lastLoggedCoordinate = coordinate;
-      log('getHoverAnnouncementFromPoint result', {
+      log('getHoverAnnouncementFromPoint fallback result', {
         coordinate,
         row,
         col,
         size,
         cellSize,
-        boardSurface: describeBoardCandidate(boardSurface)
+        boardSurface: describeBoardCandidate(activeSurface)
       });
     }
     return coordinate;

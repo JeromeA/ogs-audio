@@ -46,3 +46,15 @@ wrong rectangle, even though the rectangle was square and near the pointer.
 
 The candidate scoring now strongly prefers smaller pointer-local square elements over large containers, while still
 keeping the candidate summary logs that help diagnose wrong picks.
+
+## Container rectangles were still too indirect for accurate cursor coordinates
+
+Even after the board picker was improved, the cursor logic was still converting mouse positions by dividing a chosen
+container rectangle into equal cells.
+
+That remained inaccurate because the actual playable grid sits inside the SVG with its own exact line positions, and
+the container rectangle does not tell us where those lines really are.
+
+The cursor logic now parses the SVG grid path, extracts the exact vertical and horizontal line coordinates, and maps
+the mouse to the nearest real grid line, with the playable area extending half a cell beyond the first and last
+lines.
