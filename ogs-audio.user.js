@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.4
+// @version      0.1.5
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -28,6 +28,7 @@
   const recentLocalMoves = [];
   let lastLoggedCoordinate = null;
   let lastLoggedGridSignature = null;
+  let lastLoggedSvgFailure = null;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -403,13 +404,41 @@
       return null;
     }
 
+    if (typeof boardSurface.closest === 'function') {
+      const closestSvg = boardSurface.closest('svg');
+      if (closestSvg instanceof SVGSVGElement) {
+        return closestSvg;
+      }
+    }
+
     return boardSurface.querySelector('svg');
+  }
+
+  function getPointerBoardSvg(pointerTarget, clientX, clientY, boardSurface) {
+    const directSvg = getBoardSvg(pointerTarget);
+    if (directSvg) {
+      return directSvg;
+    }
+
+    if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof document.elementsFromPoint === 'function') {
+      const stack = document.elementsFromPoint(clientX, clientY);
+      for (const element of stack) {
+        const stackedSvg = getBoardSvg(element);
+        if (stackedSvg) {
+          return stackedSvg;
+        }
+      }
+    }
+
+    return getBoardSvg(boardSurface);
   }
 
   function getSvgCoordinateSpace(svg) {
     const viewBox = svg.viewBox && svg.viewBox.baseVal;
     if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
       return {
+        x: viewBox.x,
+        y: viewBox.y,
         width: viewBox.width,
         height: viewBox.height
       };
@@ -418,7 +447,12 @@
     const width = Number.parseFloat(svg.getAttribute('width') || '');
     const height = Number.parseFloat(svg.getAttribute('height') || '');
     if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-      return { width, height };
+      return {
+        x: 0,
+        y: 0,
+        width,
+        height
+      };
     }
 
     return null;
@@ -467,6 +501,20 @@
     return total / (values.length - 1);
   }
 
+  function maxDeviation(values, average) {
+    if (!Array.isArray(values) || values.length < 2 || !Number.isFinite(average) || average <= 0) {
+      return Infinity;
+    }
+
+    let deviation = 0;
+    for (let index = 1; index < values.length; index += 1) {
+      const step = values[index] - values[index - 1];
+      deviation = Math.max(deviation, Math.abs(step - average));
+    }
+
+    return deviation;
+  }
+
   function parseGridMetricsFromSvg(svg) {
     const coordinateSpace = getSvgCoordinateSpace(svg);
     if (!coordinateSpace) {
@@ -504,7 +552,25 @@
         continue;
       }
 
-      const score = verticals.length * horizontals.length;
+      const xDeviation = maxDeviation(verticals, xStep);
+      const yDeviation = maxDeviation(horizontals, yStep);
+      const isUniform = xDeviation <= xStep * 0.05 && yDeviation <= yStep * 0.05;
+      if (!isUniform) {
+        continue;
+      }
+
+      const stroke = String(path.getAttribute('stroke') || '').toLowerCase();
+      const strokeWidth = Number.parseFloat(String(path.getAttribute('stroke-width') || '0').replace('px', ''));
+      const segmentLength = Math.abs(verticals[verticals.length - 1] - verticals[0]) +
+        Math.abs(horizontals[horizontals.length - 1] - horizontals[0]);
+      let score = verticals.length * 1000 + horizontals.length * 1000 + segmentLength;
+      if (stroke && stroke !== 'none') {
+        score += 5000;
+      }
+      if (Number.isFinite(strokeWidth) && strokeWidth > 0) {
+        score += 1000;
+      }
+
       if (score <= bestScore) {
         continue;
       }
@@ -518,6 +584,8 @@
         bottom: horizontals[horizontals.length - 1],
         xStep,
         yStep,
+        xDeviation,
+        yDeviation,
         verticals,
         horizontals,
         coordinateSpace
@@ -538,7 +606,8 @@
         top: bestMetrics.top,
         bottom: bestMetrics.bottom,
         xStep: bestMetrics.xStep,
-        yStep: bestMetrics.yStep
+        yStep: bestMetrics.yStep,
+        coordinateSpace: bestMetrics.coordinateSpace
       });
     }
 
@@ -628,7 +697,7 @@
       return null;
     }
 
-    const boardSvg = getBoardSvg(boardSurface);
+    const boardSvg = getPointerBoardSvg(pointerTarget, clientX, clientY, boardSurface);
     const activeSurface = boardSvg || boardSurface;
     const rect = activeSurface.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
@@ -639,8 +708,10 @@
     const svgMetrics = boardSvg ? parseGridMetricsFromSvg(boardSvg) : null;
     if (svgMetrics) {
       setBoardSize(svgMetrics.boardSize);
-      const svgX = (clientX - rect.left) * svgMetrics.coordinateSpace.width / rect.width;
-      const svgY = (clientY - rect.top) * svgMetrics.coordinateSpace.height / rect.height;
+      const svgX = svgMetrics.coordinateSpace.x +
+        (clientX - rect.left) * svgMetrics.coordinateSpace.width / rect.width;
+      const svgY = svgMetrics.coordinateSpace.y +
+        (clientY - rect.top) * svgMetrics.coordinateSpace.height / rect.height;
       const leftBound = svgMetrics.left - svgMetrics.xStep / 2;
       const rightBound = svgMetrics.right + svgMetrics.xStep / 2;
       const topBound = svgMetrics.top - svgMetrics.yStep / 2;
@@ -677,6 +748,21 @@
         });
       }
       return coordinate;
+    }
+
+    const svgFailure = JSON.stringify({
+      hadBoardSvg: Boolean(boardSvg),
+      activeTag: activeSurface.tagName,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    });
+    if (svgFailure !== lastLoggedSvgFailure) {
+      lastLoggedSvgFailure = svgFailure;
+      log('getHoverAnnouncementFromPoint using fallback mapping', {
+        hadBoardSvg: Boolean(boardSvg),
+        boardSurface: describeBoardCandidate(boardSurface),
+        activeSurface: describeBoardCandidate(activeSurface)
+      });
     }
 
     const size = getBoardSize();

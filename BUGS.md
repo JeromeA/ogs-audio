@@ -58,3 +58,14 @@ the container rectangle does not tell us where those lines really are.
 The cursor logic now parses the SVG grid path, extracts the exact vertical and horizontal line coordinates, and maps
 the mouse to the nearest real grid line, with the playable area extending half a cell beyond the first and last
 lines.
+
+## The SVG grid parser could still be skipped even when hovering the real board
+
+The first SVG-based cursor implementation relied on the previously selected board surface to find the board SVG.
+
+On the live page, that surface heuristic could still resolve to a nearby container that did not expose the live SVG in
+the way the parser expected, so the code silently fell back to the old rectangle-based mapping and picked up a default
+or text-derived board size such as `19x19`.
+
+The cursor logic now searches for the SVG directly from the hovered element, from `elementsFromPoint`, and only then
+from the broader board surface. It also logs when it had to fall back, so a missed SVG parse is visible.
