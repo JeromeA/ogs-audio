@@ -22,3 +22,16 @@ had loaded at all, whether the browser hooks were attached, or which runtime pat
 The script now emits broad debug logs across the main runtime functions so we can verify script startup, hook
 installation, payload parsing, move detection, board detection, and pointer tracking directly from the browser
 console.
+
+## The cursor-audio board lookup was using the wrong search strategy
+
+The first cursor-audio implementation tried to discover the OGS board by scanning visible square `canvas` and `svg`
+elements globally and choosing the highest-scoring one.
+
+On a real OGS game page, pointer events were firing but the board lookup never found a usable surface. The source
+dump and runtime logs showed that OGS uses target-relative pointer math, so a global canvas-only scan was too weak
+and could miss the actual board container entirely.
+
+The board lookup now starts from the hovered element, walks its ancestors, inspects `elementsFromPoint`, and only
+then falls back to broader board-like selectors. The logs now include the top scored candidates so failed matches are
+observable.

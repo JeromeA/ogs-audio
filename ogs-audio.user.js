@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.1
+// @version      0.1.2
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -281,6 +281,7 @@
     let score = rect.width * rect.height;
     const lowerClass = String(element.className || '').toLowerCase();
     const lowerId = String(element.id || '').toLowerCase();
+    const lowerRole = String(element.getAttribute?.('role') || '').toLowerCase();
 
     if (lowerClass.includes('goban') || lowerClass.includes('board')) {
       score += 200000;
@@ -290,23 +291,101 @@
       score += 100000;
     }
 
+    if (lowerRole.includes('grid') || lowerRole.includes('application')) {
+      score += 25000;
+    }
+
     if (element.closest('[id="main-content"]')) {
       score += 50000;
+    }
+
+    if (element.tagName === 'CANVAS' || element.tagName === 'SVG') {
+      score += 10000;
     }
 
     return score;
   }
 
-  function findBoardSurface() {
-    logFunction('findBoardSurface');
-    const candidates = document.querySelectorAll('canvas, svg');
+  function describeBoardCandidate(element) {
+    if (!element) {
+      return null;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return {
+      tagName: element.tagName,
+      id: element.id || null,
+      className: String(element.className || ''),
+      role: element.getAttribute?.('role') || null,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    };
+  }
+
+  function pushBoardCandidate(list, element, reason) {
+    if (!(element instanceof Element)) {
+      return;
+    }
+
+    list.push({ element, reason });
+  }
+
+  function collectAncestorCandidates(start, list, reasonPrefix) {
+    let node = start instanceof Element ? start : null;
+    let depth = 0;
+
+    while (node && depth < 8) {
+      pushBoardCandidate(list, node, `${reasonPrefix}-self-${depth}`);
+      if (node instanceof HTMLElement) {
+        pushBoardCandidate(list, node.querySelector('canvas'), `${reasonPrefix}-canvas-${depth}`);
+        pushBoardCandidate(list, node.querySelector('svg'), `${reasonPrefix}-svg-${depth}`);
+        pushBoardCandidate(list, node.querySelector('[class*="goban"]'), `${reasonPrefix}-goban-${depth}`);
+        pushBoardCandidate(list, node.querySelector('[class*="board"]'), `${reasonPrefix}-board-${depth}`);
+      }
+      node = node.parentElement;
+      depth += 1;
+    }
+  }
+
+  function findBoardSurface(clientX, clientY, pointerTarget) {
+    logFunction('findBoardSurface', {
+      clientX,
+      clientY,
+      pointerTarget: pointerTarget instanceof Element ? describeBoardCandidate(pointerTarget) : null
+    });
+    const rawCandidates = [];
+    collectAncestorCandidates(pointerTarget, rawCandidates, 'pointer-target');
+
+    if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof document.elementsFromPoint === 'function') {
+      const stack = document.elementsFromPoint(clientX, clientY);
+      log('elementsFromPoint stack', stack.slice(0, 8).map((element) => describeBoardCandidate(element)));
+      for (let index = 0; index < stack.length; index += 1) {
+        collectAncestorCandidates(stack[index], rawCandidates, `elementsFromPoint-${index}`);
+      }
+    }
+
+    const selectorCandidates = document.querySelectorAll(
+      '[class*="goban"], [id*="goban"], [class*="board"], [id*="board"], canvas, svg'
+    );
+    for (const candidate of selectorCandidates) {
+      pushBoardCandidate(rawCandidates, candidate, 'selector');
+    }
+
     let best = null;
     let bestScore = -1;
+    const seen = new Set();
+    const scoredCandidates = [];
 
-    for (const candidate of candidates) {
-      if (!(candidate instanceof HTMLElement || candidate instanceof SVGElement)) {
+    for (const entry of rawCandidates) {
+      const candidate = entry.element;
+      if (!(candidate instanceof Element)) {
         continue;
       }
+
+      if (seen.has(candidate)) {
+        continue;
+      }
+      seen.add(candidate);
 
       const rect = candidate.getBoundingClientRect();
       if (!isVisibleSquare(rect)) {
@@ -319,6 +398,11 @@
       }
 
       const score = scoreBoardCandidate(candidate, rect);
+      scoredCandidates.push({
+        reason: entry.reason,
+        score,
+        ...describeBoardCandidate(candidate)
+      });
       if (score > bestScore) {
         best = candidate;
         bestScore = score;
@@ -326,7 +410,11 @@
     }
 
     log('findBoardSurface result', {
-      candidateCount: candidates.length,
+      rawCandidateCount: rawCandidates.length,
+      scoredCandidateCount: scoredCandidates.length,
+      topCandidates: scoredCandidates
+        .sort((left, right) => right.score - left.score)
+        .slice(0, 5),
       bestTagName: best ? best.tagName : null,
       bestId: best ? best.id : null,
       bestClassName: best ? String(best.className || '') : null,
@@ -403,9 +491,13 @@
     return 'Past the bottom edge. Move up.';
   }
 
-  function getHoverAnnouncementFromPoint(clientX, clientY) {
-    logFunction('getHoverAnnouncementFromPoint', { clientX, clientY });
-    const boardSurface = findBoardSurface();
+  function getHoverAnnouncementFromPoint(clientX, clientY, pointerTarget) {
+    logFunction('getHoverAnnouncementFromPoint', {
+      clientX,
+      clientY,
+      pointerTarget: pointerTarget instanceof Element ? describeBoardCandidate(pointerTarget) : null
+    });
+    const boardSurface = findBoardSurface(clientX, clientY, pointerTarget);
     if (!boardSurface) {
       log('getHoverAnnouncementFromPoint found no board surface');
       return null;
@@ -414,6 +506,7 @@
     const size = getBoardSize();
     const rect = boardSurface.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
+      log('getHoverAnnouncementFromPoint invalid rect', describeBoardCandidate(boardSurface));
       return null;
     }
 
@@ -421,6 +514,12 @@
     const localY = clientY - rect.top;
     const outsideMessage = getOutsideBoardMessage(localX, localY, rect);
     if (outsideMessage) {
+      log('getHoverAnnouncementFromPoint outside board', {
+        outsideMessage,
+        localX,
+        localY,
+        boardSurface: describeBoardCandidate(boardSurface)
+      });
       const hadRecentBoardAnnouncement =
         lastHoverAnnouncement !== null ||
         pendingHoverAnnouncement !== null ||
@@ -430,13 +529,21 @@
 
     const cellSize = rect.width / size;
     if (cellSize <= 0) {
+      log('getHoverAnnouncementFromPoint invalid cell size', { cellSize, size, rect: describeBoardCandidate(boardSurface) });
       return null;
     }
 
     const col = clamp(Math.round(localX / cellSize - 0.5), 0, size - 1);
     const row = clamp(Math.round(localY / cellSize - 0.5), 0, size - 1);
     const coordinate = toCoordinate(row, col, size);
-    log('getHoverAnnouncementFromPoint result', { coordinate, row, col, size });
+    log('getHoverAnnouncementFromPoint result', {
+      coordinate,
+      row,
+      col,
+      size,
+      cellSize,
+      boardSurface: describeBoardCandidate(boardSurface)
+    });
     return coordinate;
   }
 
@@ -775,7 +882,7 @@
           clientY: event.clientY,
           targetTagName: event.target && event.target.tagName
         });
-        const message = getHoverAnnouncementFromPoint(event.clientX, event.clientY);
+        const message = getHoverAnnouncementFromPoint(event.clientX, event.clientY, event.target);
         if (!message) {
           cancelHoverUtteranceIfLeaving(null);
           clearPendingHoverAnnouncement();
