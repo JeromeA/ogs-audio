@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.6
+// @version      0.1.7
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -30,6 +30,7 @@
   let lastLoggedGridSignature = null;
   let lastLoggedSvgFailure = null;
   let lastLoggedSvgCandidateSignature = null;
+  let lastLoggedShadowHostSignature = null;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -413,26 +414,61 @@
     return '';
   }
 
+  function describeShadowHost(host, reason) {
+    const rect = host.getBoundingClientRect();
+    return {
+      reason,
+      tagName: host.tagName,
+      id: host.id || null,
+      className: String(host.className || ''),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      hasShadowRoot: Boolean(host.shadowRoot),
+      gameId: host.getAttribute('data-game-id')
+    };
+  }
+
+  function pushShadowHostCandidate(source, list, reason) {
+    if (!(source instanceof Element)) {
+      return;
+    }
+
+    const gobanHost = source.matches?.('.Goban[data-pointers-bound="true"]')
+      ? source
+      : source.closest?.('.Goban[data-pointers-bound="true"]');
+    if (gobanHost instanceof HTMLElement) {
+      list.push({ host: gobanHost, reason });
+    }
+  }
+
+  function getShadowRootBoardSvg(host) {
+    if (!(host instanceof HTMLElement) || !host.shadowRoot) {
+      return null;
+    }
+
+    const directSvg = host.shadowRoot.querySelector('svg');
+    if (directSvg instanceof SVGSVGElement) {
+      return directSvg;
+    }
+
+    return null;
+  }
+
   function collectBoardSvgCandidates(source, list, reason) {
     if (!(source instanceof Element)) {
       return;
     }
 
     if (source instanceof SVGSVGElement) {
-      list.push({ svg: source, reason });
+      list.push({ svg: source, reason: `${reason}-self` });
     }
 
-    if (typeof source.closest === 'function') {
-      const closestSvg = source.closest('svg');
-      if (closestSvg instanceof SVGSVGElement) {
-        list.push({ svg: closestSvg, reason: `${reason}-closest` });
-      }
-    }
-
-    const nestedSvgs = source.querySelectorAll('svg');
-    for (const svg of nestedSvgs) {
-      if (svg instanceof SVGSVGElement) {
-        list.push({ svg, reason: `${reason}-descendant` });
+    const shadowHostCandidates = [];
+    pushShadowHostCandidate(source, shadowHostCandidates, reason);
+    for (const entry of shadowHostCandidates) {
+      const shadowSvg = getShadowRootBoardSvg(entry.host);
+      if (shadowSvg) {
+        list.push({ svg: shadowSvg, reason: `${entry.reason}-shadow-root` });
       }
     }
   }
@@ -451,6 +487,40 @@
   }
 
   function getPointerBoardSvg(pointerTarget, clientX, clientY, boardSurface) {
+    const rawHosts = [];
+    pushShadowHostCandidate(pointerTarget, rawHosts, 'pointer-target');
+
+    if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof document.elementsFromPoint === 'function') {
+      const stack = document.elementsFromPoint(clientX, clientY);
+      for (let index = 0; index < stack.length; index += 1) {
+        pushShadowHostCandidate(stack[index], rawHosts, `elementsFromPoint-${index}`);
+      }
+    }
+
+    pushShadowHostCandidate(boardSurface, rawHosts, 'board-surface');
+
+    const seenHosts = new Set();
+    const describedHosts = [];
+    for (const entry of rawHosts) {
+      const host = entry.host;
+      if (!(host instanceof HTMLElement) || seenHosts.has(host)) {
+        continue;
+      }
+      seenHosts.add(host);
+      describedHosts.push(describeShadowHost(host, entry.reason));
+    }
+
+    const hostSignature = describedHosts
+      .map((host) => `${host.reason}:${host.width}x${host.height}:${host.gameId || ''}:${host.hasShadowRoot}`)
+      .join('|');
+    if (hostSignature !== lastLoggedShadowHostSignature) {
+      lastLoggedShadowHostSignature = hostSignature;
+      log('getPointerBoardSvg shadow hosts', {
+        hostCount: describedHosts.length,
+        hosts: describedHosts
+      });
+    }
+
     const rawCandidates = [];
     collectBoardSvgCandidates(pointerTarget, rawCandidates, 'pointer-target');
 
@@ -478,6 +548,9 @@
       const rect = svg.getBoundingClientRect();
       const area = rect.width * rect.height;
       described.push(describeSvgCandidate(svg, entry.reason));
+      if (rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
       if (area > bestArea) {
         bestArea = area;
         bestSvg = svg;

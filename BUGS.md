@@ -69,3 +69,15 @@ or text-derived board size such as `19x19`.
 
 The cursor logic now searches for the SVG directly from the hovered element, from `elementsFromPoint`, and only then
 from the broader board surface. It also logs when it had to fall back, so a missed SVG parse is visible.
+
+## The real OGS board SVG was hidden behind an open shadow root
+
+The later cursor-audio lookup changes assumed that once the correct goban host element was found, the board SVG would
+also be reachable through normal light-DOM selectors such as `querySelector('svg')`.
+
+On the live OGS page, the actual rendered board SVG sits inside the open `shadowRoot` of the innermost
+`.Goban[data-pointers-bound="true"]` host. That made the light-DOM SVG search miss the real board entirely and pick
+unrelated zero-size SVG fragments elsewhere on the page.
+
+The lookup now targets the goban host element directly, checks its open `shadowRoot`, and prefers rendered SVGs found
+there over unrelated light-DOM SVG candidates.
