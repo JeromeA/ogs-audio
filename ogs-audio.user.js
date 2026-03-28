@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.7
+// @version      0.1.8
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -27,10 +27,6 @@
   let activeHoverAnnouncement = null;
   const recentLocalMoves = [];
   let lastLoggedCoordinate = null;
-  let lastLoggedGridSignature = null;
-  let lastLoggedSvgFailure = null;
-  let lastLoggedSvgCandidateSignature = null;
-  let lastLoggedShadowHostSignature = null;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -48,6 +44,32 @@
   function logFunction(name, details) {
     void name;
     void details;
+  }
+
+  function summarizeValue(value) {
+    if (value == null) {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      return value.length > 160 ? `${value.slice(0, 160)}...` : value;
+    }
+
+    if (Array.isArray(value)) {
+      return {
+        type: 'array',
+        length: value.length
+      };
+    }
+
+    if (typeof value === 'object') {
+      return {
+        type: 'object',
+        keys: Object.keys(value).slice(0, 12)
+      };
+    }
+
+    return value;
   }
 
   function speak(text) {
@@ -187,6 +209,7 @@
       return;
     }
 
+    log('rememberLocalMove', { coordinate });
     const now = Date.now();
     recentLocalMoves.push({ coordinate, at: now });
     pruneRecentLocalMoves(now);
@@ -204,10 +227,21 @@
   }
 
   function announceRemoteMove(coordinate) {
-    if (!coordinate || coordinate === lastAnnouncedRemoteMove || isRecentLocalMove(coordinate)) {
+    if (!coordinate) {
       return;
     }
 
+    if (coordinate === lastAnnouncedRemoteMove) {
+      log('announceRemoteMove skipped duplicate', { coordinate });
+      return;
+    }
+
+    if (isRecentLocalMove(coordinate)) {
+      log('announceRemoteMove skipped recent local move', { coordinate });
+      return;
+    }
+
+    log('announceRemoteMove speaking', { coordinate });
     lastAnnouncedRemoteMove = coordinate;
     if (coordinate === 'pass') {
       speak('Opponent passes');
@@ -510,17 +544,6 @@
       describedHosts.push(describeShadowHost(host, entry.reason));
     }
 
-    const hostSignature = describedHosts
-      .map((host) => `${host.reason}:${host.width}x${host.height}:${host.gameId || ''}:${host.hasShadowRoot}`)
-      .join('|');
-    if (hostSignature !== lastLoggedShadowHostSignature) {
-      lastLoggedShadowHostSignature = hostSignature;
-      log('getPointerBoardSvg shadow hosts', {
-        hostCount: describedHosts.length,
-        hosts: describedHosts
-      });
-    }
-
     const rawCandidates = [];
     collectBoardSvgCandidates(pointerTarget, rawCandidates, 'pointer-target');
 
@@ -555,18 +578,6 @@
         bestArea = area;
         bestSvg = svg;
       }
-    }
-
-    const signature = described
-      .map((candidate) => `${candidate.reason}:${candidate.width}x${candidate.height}:${candidate.viewBox || ''}`)
-      .join('|');
-    if (signature !== lastLoggedSvgCandidateSignature) {
-      lastLoggedSvgCandidateSignature = signature;
-      log('getPointerBoardSvg candidates', {
-        candidateCount: described.length,
-        selected: bestSvg ? describeSvgCandidate(bestSvg, 'selected') : null,
-        candidates: described
-      });
     }
 
     return bestSvg;
@@ -735,21 +746,6 @@
       return null;
     }
 
-    const signature = `${bestMetrics.boardSize}:${bestMetrics.left}:${bestMetrics.right}:${bestMetrics.top}:${bestMetrics.bottom}`;
-    if (signature !== lastLoggedGridSignature) {
-      lastLoggedGridSignature = signature;
-      log('parseGridMetricsFromSvg result', {
-        boardSize: bestMetrics.boardSize,
-        left: bestMetrics.left,
-        right: bestMetrics.right,
-        top: bestMetrics.top,
-        bottom: bestMetrics.bottom,
-        xStep: bestMetrics.xStep,
-        yStep: bestMetrics.yStep,
-        coordinateSpace: bestMetrics.coordinateSpace
-      });
-    }
-
     return bestMetrics;
   }
 
@@ -832,7 +828,6 @@
   function getHoverAnnouncementFromPoint(clientX, clientY, pointerTarget) {
     const boardSurface = findBoardSurface(clientX, clientY, pointerTarget);
     if (!boardSurface) {
-      log('getHoverAnnouncementFromPoint found no board surface');
       return null;
     }
 
@@ -840,7 +835,6 @@
     const activeSurface = boardSvg || boardSurface;
     const rect = activeSurface.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
-      log('getHoverAnnouncementFromPoint invalid rect', describeBoardCandidate(activeSurface));
       return null;
     }
 
@@ -874,34 +868,8 @@
       const col = nearestIndex(svgMetrics.verticals, svgX);
       const row = nearestIndex(svgMetrics.horizontals, svgY);
       const coordinate = toCoordinate(row, col, svgMetrics.boardSize);
-      if (coordinate !== lastLoggedCoordinate) {
-        lastLoggedCoordinate = coordinate;
-        log('getHoverAnnouncementFromPoint result', {
-          coordinate,
-          row,
-          col,
-          boardSize: svgMetrics.boardSize,
-          svgX,
-          svgY,
-          boardSurface: describeBoardCandidate(activeSurface)
-        });
-      }
+      lastLoggedCoordinate = coordinate;
       return coordinate;
-    }
-
-    const svgFailure = JSON.stringify({
-      hadBoardSvg: Boolean(boardSvg),
-      activeTag: activeSurface.tagName,
-      width: Math.round(rect.width),
-      height: Math.round(rect.height)
-    });
-    if (svgFailure !== lastLoggedSvgFailure) {
-      lastLoggedSvgFailure = svgFailure;
-      log('getHoverAnnouncementFromPoint using fallback mapping', {
-        hadBoardSvg: Boolean(boardSvg),
-        boardSurface: describeBoardCandidate(boardSurface),
-        activeSurface: describeBoardCandidate(activeSurface)
-      });
     }
 
     const size = getBoardSize();
@@ -918,24 +886,13 @@
 
     const cellSize = rect.width / size;
     if (cellSize <= 0) {
-      log('getHoverAnnouncementFromPoint invalid cell size', { cellSize, size, rect: describeBoardCandidate(activeSurface) });
       return null;
     }
 
     const col = clamp(Math.round(localX / cellSize - 0.5), 0, size - 1);
     const row = clamp(Math.round(localY / cellSize - 0.5), 0, size - 1);
     const coordinate = toCoordinate(row, col, size);
-    if (coordinate !== lastLoggedCoordinate) {
-      lastLoggedCoordinate = coordinate;
-      log('getHoverAnnouncementFromPoint fallback result', {
-        coordinate,
-        row,
-        col,
-        size,
-        cellSize,
-        boardSurface: describeBoardCandidate(activeSurface)
-      });
-    }
+    lastLoggedCoordinate = coordinate;
     return coordinate;
   }
 
@@ -1003,6 +960,15 @@
     return null;
   }
 
+  function logDetectedMove(source, direction, coordinate, value) {
+    log('move detected', {
+      source,
+      direction,
+      coordinate,
+      value: summarizeValue(value)
+    });
+  }
+
   function walkPayload(value, visitor, seen = new WeakSet()) {
     if (!value || typeof value !== 'object') {
       return;
@@ -1028,12 +994,19 @@
   }
 
   function analyzePayload(payload, direction) {
+    log('analyzePayload', {
+      direction,
+      payload: summarizeValue(payload)
+    });
+
     walkPayload(payload, (value) => {
       maybeRecordBoardSizeFromObject(value);
       const coordinate = extractMoveCoordinate(value);
       if (!coordinate) {
         return;
       }
+
+      logDetectedMove('payload', direction, coordinate, value);
 
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
@@ -1055,8 +1028,17 @@
 
     const candidate = raw.slice(firstJsonChar);
     try {
-      return JSON.parse(candidate);
+      const parsed = JSON.parse(candidate);
+      log('parseSocketPayload success', {
+        prefixOffset: firstJsonChar,
+        payload: summarizeValue(parsed)
+      });
+      return parsed;
     } catch (error) {
+      log('parseSocketPayload failed', {
+        prefixOffset: firstJsonChar,
+        raw: summarizeValue(candidate)
+      });
       return null;
     }
   }
@@ -1066,6 +1048,11 @@
       return;
     }
 
+    log('analyzeRawText', {
+      direction,
+      raw: summarizeValue(raw)
+    });
+
     const parsed = parseSocketPayload(raw);
     if (parsed) {
       analyzePayload(parsed, direction);
@@ -1074,6 +1061,7 @@
     const sgfMoveMatch = raw.match(/"move"\s*:\s*"([a-z]{2}|pass|\.\.)"/i);
     if (sgfMoveMatch) {
       const coordinate = normalizeCoordinate(sgfMoveMatch[1]);
+      logDetectedMove('raw.move', direction, coordinate, sgfMoveMatch[1]);
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
       } else {
@@ -1084,6 +1072,7 @@
     const xyMatch = raw.match(/"x"\s*:\s*(-?\d+)[^]*?"y"\s*:\s*(-?\d+)/i);
     if (xyMatch) {
       const coordinate = coordinateFromXY(Number.parseInt(xyMatch[1], 10), Number.parseInt(xyMatch[2], 10));
+      logDetectedMove('raw.xy', direction, coordinate, { x: xyMatch[1], y: xyMatch[2] });
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
       } else {
@@ -1108,9 +1097,16 @@
     }
 
     window.WebSocket = function(...args) {
+      log('WebSocket created', {
+        url: summarizeValue(args[0])
+      });
       const socket = new NativeWebSocket(...args);
       socket.addEventListener('message', (event) => {
         if (typeof event.data === 'string') {
+          log('WebSocket message', {
+            direction: 'incoming',
+            raw: summarizeValue(event.data)
+          });
           analyzeRawText(event.data, 'incoming');
         }
       });
@@ -1118,6 +1114,10 @@
       const nativeSend = socket.send;
       socket.send = function(data) {
         if (typeof data === 'string') {
+          log('WebSocket send', {
+            direction: 'outgoing',
+            raw: summarizeValue(data)
+          });
           analyzeRawText(data, 'outgoing');
         }
         return nativeSend.call(this, data);
@@ -1142,6 +1142,7 @@
       try {
         const clone = response.clone();
         const contentType = clone.headers.get('content-type') || '';
+        const requestUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || response.url;
         const shouldInspect =
           response.url.includes('/api/') ||
           response.url.includes('/termination-api/') ||
@@ -1150,12 +1151,26 @@
           return response;
         }
 
+        log('fetch response', {
+          url: requestUrl,
+          responseUrl: response.url,
+          contentType
+        });
+
         if (contentType.includes('application/json')) {
           clone.json().then((data) => {
+            log('fetch json body', {
+              url: response.url,
+              payload: summarizeValue(data)
+            });
             analyzePayload(data, 'incoming');
           }).catch(() => {});
         } else if (contentType.includes('text/')) {
           clone.text().then((text) => {
+            log('fetch text body', {
+              url: response.url,
+              raw: summarizeValue(text)
+            });
             analyzeRawText(text, 'incoming');
           }).catch(() => {});
         }
@@ -1170,11 +1185,20 @@
     const originalSend = XMLHttpRequest.prototype.send;
 
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__ogsAudioMethod = typeof method === 'string' ? method : '';
       this.__ogsAudioUrl = typeof url === 'string' ? url : '';
       return originalOpen.call(this, method, url, ...rest);
     };
 
     XMLHttpRequest.prototype.send = function(body) {
+      if (this.__ogsAudioUrl) {
+        log('xhr send', {
+          method: this.__ogsAudioMethod,
+          url: this.__ogsAudioUrl,
+          body: summarizeValue(body)
+        });
+      }
+
       if (typeof body === 'string') {
         analyzeRawText(body, 'outgoing');
       }
@@ -1192,7 +1216,18 @@
             return;
           }
 
+          log('xhr load', {
+            method: this.__ogsAudioMethod,
+            url: this.__ogsAudioUrl,
+            responseURL: this.responseURL,
+            responseType: this.responseType
+          });
+
           if (typeof this.responseText === 'string' && this.responseText) {
+            log('xhr text body', {
+              url: this.responseURL,
+              raw: summarizeValue(this.responseText)
+            });
             analyzeRawText(this.responseText, 'incoming');
           }
         } catch (error) {}

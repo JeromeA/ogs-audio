@@ -81,3 +81,14 @@ unrelated zero-size SVG fragments elsewhere on the page.
 
 The lookup now targets the goban host element directly, checks its open `shadowRoot`, and prefers rendered SVGs found
 there over unrelated light-DOM SVG candidates.
+
+## Opponent move detection could stay completely silent even when cursor audio worked
+
+Once the cursor-audio path was working, the userscript still produced no useful diagnostics when the opponent played a
+move.
+
+That made it unclear whether OGS was delivering moves over WebSocket, `fetch`, `XMLHttpRequest`, or some other path,
+and whether the script was seeing the traffic but failing to extract a coordinate or not seeing move traffic at all.
+
+The transport and move-analysis paths now log WebSocket, `fetch`, and XHR activity for OGS game-related traffic, plus
+payload parsing, coordinate extraction, and remote-move suppression decisions.
