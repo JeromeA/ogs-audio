@@ -124,3 +124,14 @@ That fallback was known to be structurally wrong for OGS because it divided a co
 instead of using the actual grid geometry from the board SVG.
 
 The fallback has now been removed so cursor audio only runs when the SVG-grid path succeeds.
+
+## Board mutation logs were too coarse to distinguish hover previews from committed moves
+
+After adding a shadow-root mutation observer on the rendered board, the logs did prove that hover previews and played
+moves both mutated the board SVG.
+
+But the first mutation summaries only logged target tags and added/removed node counts. That was too little
+information to tell a transient half-transparent shadow stone from a committed move stone or its "last move" marker.
+
+The board mutation summaries now include the actual added and removed SVG nodes with tag names, classes, hrefs,
+coordinates, transforms, fill and stroke data, and opacity-related attributes.

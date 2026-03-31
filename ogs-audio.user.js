@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.11
+// @version      0.1.12
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -18,7 +18,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.11';
+  const SCRIPT_VERSION = '0.1.12';
 
   let boardSize = null;
   let lastAnnouncedRemoteMove = null;
@@ -93,13 +93,52 @@
     };
   }
 
+  function summarizeSvgNode(node) {
+    if (!(node instanceof Element)) {
+      return {
+        nodeType: node?.nodeType ?? null
+      };
+    }
+
+    const style = node instanceof HTMLElement || node instanceof SVGElement
+      ? window.getComputedStyle(node)
+      : null;
+    const href = node.getAttribute('href') || node.getAttribute('xlink:href');
+    const opacity = node.getAttribute('opacity') || style?.opacity || null;
+    const fillOpacity = node.getAttribute('fill-opacity') || style?.fillOpacity || null;
+    const strokeOpacity = node.getAttribute('stroke-opacity') || style?.strokeOpacity || null;
+
+    return {
+      tagName: node.tagName,
+      className: node.getAttribute('class') || '',
+      href: href || null,
+      x: node.getAttribute('x'),
+      y: node.getAttribute('y'),
+      cx: node.getAttribute('cx'),
+      cy: node.getAttribute('cy'),
+      r: node.getAttribute('r'),
+      transform: node.getAttribute('transform'),
+      fill: node.getAttribute('fill'),
+      stroke: node.getAttribute('stroke'),
+      opacity,
+      fillOpacity,
+      strokeOpacity,
+      parentTagName: node.parentElement?.tagName || null,
+      parentClassName: node.parentElement?.getAttribute('class') || '',
+      isCircleMarker: node.tagName === 'circle',
+      isUseStone: node.tagName === 'use'
+    };
+  }
+
   function summarizeMutationRecord(record) {
     return {
       type: record.type,
       target: record.target instanceof Element ? record.target.tagName : null,
       addedNodes: record.addedNodes.length,
       removedNodes: record.removedNodes.length,
-      attributeName: record.attributeName || null
+      attributeName: record.attributeName || null,
+      added: Array.from(record.addedNodes).slice(0, 4).map(summarizeSvgNode),
+      removed: Array.from(record.removedNodes).slice(0, 4).map(summarizeSvgNode)
     };
   }
 
