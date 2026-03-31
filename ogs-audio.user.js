@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.9
+// @version      0.1.11
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -18,6 +18,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
+  const SCRIPT_VERSION = '0.1.11';
 
   let boardSize = null;
   let lastAnnouncedRemoteMove = null;
@@ -31,6 +32,8 @@
   let gobanScanTimerId = null;
   let installedGobanInstrumentation = false;
   const instrumentedObjects = new WeakSet();
+  const observedBoardRoots = new WeakSet();
+  let loggedMissingGobanCandidate = false;
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -87,6 +90,16 @@
       y: node.y,
       player: node.player,
       text: typeof node.text === 'string' ? summarizeValue(node.text) : undefined
+    };
+  }
+
+  function summarizeMutationRecord(record) {
+    return {
+      type: record.type,
+      target: record.target instanceof Element ? record.target.tagName : null,
+      addedNodes: record.addedNodes.length,
+      removedNodes: record.removedNodes.length,
+      attributeName: record.attributeName || null
     };
   }
 
@@ -506,6 +519,32 @@
     return null;
   }
 
+  function installBoardMutationObserver(host) {
+    if (!(host instanceof HTMLElement) || !host.shadowRoot || observedBoardRoots.has(host.shadowRoot)) {
+      return;
+    }
+
+    observedBoardRoots.add(host.shadowRoot);
+    const observer = new MutationObserver((records) => {
+      log('board shadow mutation', {
+        hostGameId: host.getAttribute('data-game-id'),
+        records: records.slice(0, 10).map(summarizeMutationRecord)
+      });
+    });
+
+    observer.observe(host.shadowRoot, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['href', 'x', 'y', 'transform', 'class']
+    });
+
+    log('installBoardMutationObserver', {
+      gameId: host.getAttribute('data-game-id'),
+      className: String(host.className || '')
+    });
+  }
+
   function collectBoardSvgCandidates(source, list, reason) {
     if (!(source instanceof Element)) {
       return;
@@ -889,29 +928,7 @@
       lastLoggedCoordinate = coordinate;
       return coordinate;
     }
-
-    const size = getBoardSize();
-    const localX = clientX - rect.left;
-    const localY = clientY - rect.top;
-    const outsideMessage = getOutsideBoardMessage(localX, localY, rect);
-    if (outsideMessage) {
-      const hadRecentBoardAnnouncement =
-        lastHoverAnnouncement !== null ||
-        pendingHoverAnnouncement !== null ||
-        activeHoverAnnouncement !== null;
-      return hadRecentBoardAnnouncement ? outsideMessage : null;
-    }
-
-    const cellSize = rect.width / size;
-    if (cellSize <= 0) {
-      return null;
-    }
-
-    const col = clamp(Math.round(localX / cellSize - 0.5), 0, size - 1);
-    const row = clamp(Math.round(localY / cellSize - 0.5), 0, size - 1);
-    const coordinate = toCoordinate(row, col, size);
-    lastLoggedCoordinate = coordinate;
-    return coordinate;
+    return null;
   }
 
   function maybeRecordBoardSizeFromObject(value) {
@@ -1145,6 +1162,10 @@
 
     const hosts = document.querySelectorAll('.Goban[data-game-id], .Goban[data-pointers-bound="true"]');
     for (const host of hosts) {
+      if (host instanceof HTMLElement) {
+        installBoardMutationObserver(host);
+      }
+
       if (searchForGobanLike(host, 'host')) {
         return;
       }
@@ -1158,7 +1179,10 @@
       return;
     }
 
-    log('installGobanInstrumentation scan found no goban candidate');
+    if (!loggedMissingGobanCandidate) {
+      loggedMissingGobanCandidate = true;
+      log('installGobanInstrumentation scan found no goban candidate');
+    }
   }
 
   function startGobanInstrumentationScan() {
@@ -1471,5 +1495,6 @@
   installFetchHook();
   installXhrHook();
   installPointerHook();
+  log('script boot', { version: SCRIPT_VERSION });
   startGobanInstrumentationScan();
 })();

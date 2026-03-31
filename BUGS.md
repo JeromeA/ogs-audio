@@ -105,3 +105,22 @@ socket and goban engine layers.
 The userscript now also scans for the live goban/engine instance and instruments move-application methods such as
 `place`, `editPlace`, and `jumpTo`, so the next log capture can show whether moves are entering through engine state
 changes rather than browser-level network APIs.
+
+## It was too easy to misread logs from an older installed userscript version
+
+While debugging the move path, it was possible to reload the page with an older Tampermonkey-installed version and
+mistake those logs for the current code.
+
+That made some log captures misleading, because the absence of a new probe did not necessarily mean the new code path
+had failed. It could also mean the browser was still running an older userscript build.
+
+The userscript now logs its own version at startup so each log capture can be tied to the exact installed build.
+
+## The old rectangle fallback for cursor audio could still produce wrong coordinates
+
+Even after the SVG-grid cursor path was working, the earlier rectangle-based fallback was still present in the code.
+
+That fallback was known to be structurally wrong for OGS because it divided a container rectangle into equal cells
+instead of using the actual grid geometry from the board SVG.
+
+The fallback has now been removed so cursor audio only runs when the SVG-grid path succeeds.
