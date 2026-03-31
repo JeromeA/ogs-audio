@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.8
+// @version      0.1.9
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -17,6 +17,7 @@
   const LOCAL_MOVE_MEMORY_MS = 2500;
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
+  const GOBAN_SCAN_INTERVAL_MS = 1000;
 
   let boardSize = null;
   let lastAnnouncedRemoteMove = null;
@@ -27,6 +28,9 @@
   let activeHoverAnnouncement = null;
   const recentLocalMoves = [];
   let lastLoggedCoordinate = null;
+  let gobanScanTimerId = null;
+  let installedGobanInstrumentation = false;
+  const instrumentedObjects = new WeakSet();
 
   function log(message, details) {
     if (!DEBUG_LOGGING) {
@@ -70,6 +74,20 @@
     }
 
     return value;
+  }
+
+  function summarizeMoveNode(node) {
+    if (!node || typeof node !== 'object') {
+      return summarizeValue(node);
+    }
+
+    return {
+      move_number: node.move_number,
+      x: node.x,
+      y: node.y,
+      player: node.player,
+      text: typeof node.text === 'string' ? summarizeValue(node.text) : undefined
+    };
   }
 
   function speak(text) {
@@ -969,6 +987,199 @@
     });
   }
 
+  function coordinateFromGobanLike(goban, x, y) {
+    if (!goban || typeof goban !== 'object') {
+      return coordinateFromXY(x, y);
+    }
+
+    try {
+      if (typeof goban.prettyCoordinates === 'function') {
+        return goban.prettyCoordinates(x, y);
+      }
+    } catch (error) {}
+
+    try {
+      if (goban.engine && typeof goban.engine.prettyCoordinates === 'function') {
+        return goban.engine.prettyCoordinates(x, y);
+      }
+    } catch (error) {}
+
+    return coordinateFromXY(x, y);
+  }
+
+  function looksLikeEngine(value) {
+    return Boolean(
+      value &&
+      typeof value === 'object' &&
+      typeof value.place === 'function' &&
+      typeof value.editPlace === 'function' &&
+      typeof value.jumpTo === 'function' &&
+      typeof value.decodeMoves === 'function'
+    );
+  }
+
+  function looksLikeGoban(value) {
+    return Boolean(
+      value &&
+      typeof value === 'object' &&
+      (
+        typeof value.prettyCoordinates === 'function' ||
+        looksLikeEngine(value.engine)
+      )
+    );
+  }
+
+  function instrumentMethod(target, methodName, formatter) {
+    if (!target || typeof target[methodName] !== 'function' || instrumentedObjects.has(target[methodName])) {
+      return;
+    }
+
+    const original = target[methodName];
+    const wrapped = function(...args) {
+      try {
+        log(methodName, formatter.call(this, args));
+      } catch (error) {
+        log(`${methodName} formatter error`, summarizeValue(String(error)));
+      }
+      return original.apply(this, args);
+    };
+
+    instrumentedObjects.add(wrapped);
+    target[methodName] = wrapped;
+  }
+
+  function instrumentGobanLike(goban, reason) {
+    if (!goban || typeof goban !== 'object' || instrumentedObjects.has(goban)) {
+      return false;
+    }
+
+    instrumentedObjects.add(goban);
+    const engine = looksLikeEngine(goban) ? goban : goban.engine;
+    log('instrumentGobanLike', {
+      reason,
+      hasEngine: Boolean(engine),
+      keys: Object.keys(goban).slice(0, 20)
+    });
+
+    if (engine && typeof engine === 'object') {
+      instrumentMethod(engine, 'place', function(args) {
+        const [x, y] = args;
+        return {
+          source: reason,
+          coordinate: coordinateFromGobanLike(goban, x, y),
+          x,
+          y,
+          args: summarizeValue(args),
+          cur_move_before: summarizeMoveNode(this.cur_move)
+        };
+      });
+
+      instrumentMethod(engine, 'editPlace', function(args) {
+        const [x, y, color] = args;
+        return {
+          source: reason,
+          coordinate: coordinateFromGobanLike(goban, x, y),
+          x,
+          y,
+          color,
+          args: summarizeValue(args),
+          cur_move_before: summarizeMoveNode(this.cur_move)
+        };
+      });
+
+      instrumentMethod(engine, 'jumpTo', function(args) {
+        return {
+          source: reason,
+          args: summarizeValue(args),
+          target: summarizeMoveNode(args[0]),
+          cur_move_before: summarizeMoveNode(this.cur_move)
+        };
+      });
+    }
+
+    installedGobanInstrumentation = true;
+    return true;
+  }
+
+  function searchForGobanLike(root, reason, seen = new WeakSet(), depth = 0) {
+    if (!root || typeof root !== 'object' || seen.has(root) || depth > 4) {
+      return false;
+    }
+    seen.add(root);
+
+    if (looksLikeGoban(root) || looksLikeEngine(root)) {
+      return instrumentGobanLike(root, reason);
+    }
+
+    let keys = [];
+    try {
+      keys = Object.getOwnPropertyNames(root);
+    } catch (error) {
+      return false;
+    }
+
+    for (const key of keys.slice(0, 40)) {
+      let value = null;
+      try {
+        value = root[key];
+      } catch (error) {
+        continue;
+      }
+
+      if (!value || typeof value !== 'object') {
+        continue;
+      }
+
+      if (searchForGobanLike(value, `${reason}.${key}`, seen, depth + 1)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function installGobanInstrumentation() {
+    if (installedGobanInstrumentation) {
+      return;
+    }
+
+    const hosts = document.querySelectorAll('.Goban[data-game-id], .Goban[data-pointers-bound="true"]');
+    for (const host of hosts) {
+      if (searchForGobanLike(host, 'host')) {
+        return;
+      }
+
+      if (host instanceof HTMLElement && host.shadowRoot && searchForGobanLike(host.shadowRoot, 'shadowRoot')) {
+        return;
+      }
+    }
+
+    if (searchForGobanLike(window, 'window')) {
+      return;
+    }
+
+    log('installGobanInstrumentation scan found no goban candidate');
+  }
+
+  function startGobanInstrumentationScan() {
+    installGobanInstrumentation();
+    if (installedGobanInstrumentation) {
+      return;
+    }
+
+    gobanScanTimerId = window.setInterval(() => {
+      if (installedGobanInstrumentation) {
+        if (gobanScanTimerId !== null) {
+          clearInterval(gobanScanTimerId);
+          gobanScanTimerId = null;
+        }
+        return;
+      }
+
+      installGobanInstrumentation();
+    }, GOBAN_SCAN_INTERVAL_MS);
+  }
+
   function walkPayload(value, visitor, seen = new WeakSet()) {
     if (!value || typeof value !== 'object') {
       return;
@@ -1260,4 +1471,5 @@
   installFetchHook();
   installXhrHook();
   installPointerHook();
+  startGobanInstrumentationScan();
 })();

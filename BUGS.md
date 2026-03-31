@@ -92,3 +92,16 @@ and whether the script was seeing the traffic but failing to extract a coordinat
 
 The transport and move-analysis paths now log WebSocket, `fetch`, and XHR activity for OGS game-related traffic, plus
 payload parsing, coordinate extraction, and remote-move suppression decisions.
+
+## Live OGS moves could bypass generic browser network hooks entirely
+
+After adding transport diagnostics, the logs still showed only startup REST traffic and nothing when later moves were
+played.
+
+That meant the active game was not exposing its live move stream through the generic `window.WebSocket`, `fetch`, or
+XHR paths in a way the userscript could observe after startup. The source dump also showed OGS has its own internal
+socket and goban engine layers.
+
+The userscript now also scans for the live goban/engine instance and instruments move-application methods such as
+`place`, `editPlace`, and `jumpTo`, so the next log capture can show whether moves are entering through engine state
+changes rather than browser-level network APIs.
