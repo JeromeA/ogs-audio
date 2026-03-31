@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.12
+// @version      0.1.13
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -15,20 +15,22 @@
   const MAX_BOARD_SIZE = 25;
   const BOARD_LETTERS = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
   const LOCAL_MOVE_MEMORY_MS = 2500;
+  const PREVIEW_MEMORY_MS = 5000;
+  const MOVE_DEDUPE_MS = 1500;
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.12';
+  const SCRIPT_VERSION = '0.1.13';
 
   let boardSize = null;
-  let lastAnnouncedRemoteMove = null;
   let lastHoverAnnouncement = null;
   let pendingHoverAnnouncement = null;
   let hoverTimerId = null;
   let activeHoverUtterance = null;
   let activeHoverAnnouncement = null;
   const recentLocalMoves = [];
-  let lastLoggedCoordinate = null;
+  const recentPreviews = new Map();
+  const recentMoveDetections = [];
   let gobanScanTimerId = null;
   let installedGobanInstrumentation = false;
   const instrumentedObjects = new WeakSet();
@@ -93,53 +95,105 @@
     };
   }
 
-  function summarizeSvgNode(node) {
-    if (!(node instanceof Element)) {
-      return {
-        nodeType: node?.nodeType ?? null
-      };
+  function parseNumericOpacity(value) {
+    if (value == null || value === '') {
+      return 1;
     }
 
-    const style = node instanceof HTMLElement || node instanceof SVGElement
-      ? window.getComputedStyle(node)
-      : null;
-    const href = node.getAttribute('href') || node.getAttribute('xlink:href');
-    const opacity = node.getAttribute('opacity') || style?.opacity || null;
-    const fillOpacity = node.getAttribute('fill-opacity') || style?.fillOpacity || null;
-    const strokeOpacity = node.getAttribute('stroke-opacity') || style?.strokeOpacity || null;
-
-    return {
-      tagName: node.tagName,
-      className: node.getAttribute('class') || '',
-      href: href || null,
-      x: node.getAttribute('x'),
-      y: node.getAttribute('y'),
-      cx: node.getAttribute('cx'),
-      cy: node.getAttribute('cy'),
-      r: node.getAttribute('r'),
-      transform: node.getAttribute('transform'),
-      fill: node.getAttribute('fill'),
-      stroke: node.getAttribute('stroke'),
-      opacity,
-      fillOpacity,
-      strokeOpacity,
-      parentTagName: node.parentElement?.tagName || null,
-      parentClassName: node.parentElement?.getAttribute('class') || '',
-      isCircleMarker: node.tagName === 'circle',
-      isUseStone: node.tagName === 'use'
-    };
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 1;
   }
 
-  function summarizeMutationRecord(record) {
-    return {
-      type: record.type,
-      target: record.target instanceof Element ? record.target.tagName : null,
-      addedNodes: record.addedNodes.length,
-      removedNodes: record.removedNodes.length,
-      attributeName: record.attributeName || null,
-      added: Array.from(record.addedNodes).slice(0, 4).map(summarizeSvgNode),
-      removed: Array.from(record.removedNodes).slice(0, 4).map(summarizeSvgNode)
-    };
+  function parseTranslate(value) {
+    if (typeof value !== 'string') {
+      return null;
+    }
+
+    const match = value.match(/translate\(\s*([-\d.]+)(?:[,\s]+([-\d.]+))?\s*\)/i);
+    if (!match) {
+      return null;
+    }
+
+    const x = Number.parseFloat(match[1]);
+    const y = Number.parseFloat(match[2] ?? '0');
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+
+    return { x, y };
+  }
+
+  function formatPointKey(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+
+    const roundedX = Math.round(x * 1000) / 1000;
+    const roundedY = Math.round(y * 1000) / 1000;
+    return `${roundedX},${roundedY}`;
+  }
+
+  function parseStoneColorFromHref(href) {
+    if (typeof href !== 'string') {
+      return 'unknown';
+    }
+
+    const lower = href.toLowerCase();
+    if (lower.includes('white')) {
+      return 'white';
+    }
+
+    if (lower.includes('black')) {
+      return 'black';
+    }
+
+    return 'unknown';
+  }
+
+  function getBoardPointFromGraphicsElement(node) {
+    if (!(node instanceof SVGGraphicsElement)) {
+      return null;
+    }
+
+    try {
+      const bbox = node.getBBox();
+      const matrix = node.getCTM();
+      if (!bbox || !matrix) {
+        return null;
+      }
+
+      const centerX = bbox.x + bbox.width / 2;
+      const centerY = bbox.y + bbox.height / 2;
+      return {
+        x: matrix.a * centerX + matrix.c * centerY + matrix.e,
+        y: matrix.b * centerX + matrix.d * centerY + matrix.f
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function getTranslateFromNode(node) {
+    let current = node instanceof Element ? node : null;
+    while (current) {
+      const parsed = parseTranslate(current.getAttribute('transform'));
+      if (parsed) {
+        return parsed;
+      }
+
+      if (current instanceof SVGSVGElement) {
+        return null;
+      }
+
+      const parent = current.parentNode;
+      current = parent instanceof Element ? parent : null;
+    }
+
+    return null;
+  }
+
+  function extractNodePoint(node) {
+    return getBoardPointFromGraphicsElement(node) || getTranslateFromNode(node);
   }
 
   function speak(text) {
@@ -291,34 +345,93 @@
     }
   }
 
-  function isRecentLocalMove(coordinate) {
-    pruneRecentLocalMoves();
-    return recentLocalMoves.some((entry) => entry.coordinate === coordinate);
+  function prunePreviews(now = Date.now()) {
+    for (const [key, entry] of recentPreviews.entries()) {
+      if (now - entry.at > PREVIEW_MEMORY_MS) {
+        recentPreviews.delete(key);
+      }
+    }
   }
 
-  function announceRemoteMove(coordinate) {
-    if (!coordinate) {
+  function rememberPreview(entry) {
+    if (!entry?.key) {
       return;
     }
 
-    if (coordinate === lastAnnouncedRemoteMove) {
-      log('announceRemoteMove skipped duplicate', { coordinate });
+    const now = Date.now();
+    recentPreviews.set(entry.key, {
+      at: now,
+      color: entry.color,
+      x: entry.x,
+      y: entry.y
+    });
+    prunePreviews(now);
+  }
+
+  function wasRecentPreview(key, color = null) {
+    prunePreviews();
+    const entry = recentPreviews.get(key);
+    if (!entry) {
+      return false;
+    }
+
+    return color == null || entry.color === color;
+  }
+
+  function pruneRecentMoveDetections(now = Date.now()) {
+    while (
+      recentMoveDetections.length > 0 &&
+      now - recentMoveDetections[0].at > MOVE_DEDUPE_MS
+    ) {
+      recentMoveDetections.shift();
+    }
+  }
+
+  function recentlyDetectedMove(moveKey) {
+    pruneRecentMoveDetections();
+    return recentMoveDetections.some((entry) => entry.moveKey === moveKey);
+  }
+
+  function rememberDetectedMove(moveKey) {
+    const now = Date.now();
+    recentMoveDetections.push({ moveKey, at: now });
+    pruneRecentMoveDetections(now);
+  }
+
+  function describeDetectedMove(move) {
+    return {
+      source: move.source,
+      color: move.color,
+      coordinate: move.coordinate,
+      translate: move.translate,
+      reason: move.reason
+    };
+  }
+
+  function announceDetectedMove(move) {
+    if (!move?.coordinate) {
       return;
     }
 
-    if (isRecentLocalMove(coordinate)) {
-      log('announceRemoteMove skipped recent local move', { coordinate });
+    const moveKey = `${move.source}:${move.color}:${move.coordinate}`;
+    if (recentlyDetectedMove(moveKey)) {
+      log('move deduped', describeDetectedMove(move));
       return;
     }
 
-    log('announceRemoteMove speaking', { coordinate });
-    lastAnnouncedRemoteMove = coordinate;
-    if (coordinate === 'pass') {
-      speak('Opponent passes');
+    rememberDetectedMove(moveKey);
+    rememberLocalMove(move.coordinate);
+    log('move detected', describeDetectedMove(move));
+
+    const colorWord = move.color === 'unknown'
+      ? 'Stone'
+      : `${move.color[0].toUpperCase()}${move.color.slice(1)}`;
+    if (move.coordinate === 'pass') {
+      speak(`${colorWord} passes`);
       return;
     }
 
-    speak(`Opponent plays ${coordinate}`);
+    speak(`${colorWord} plays ${move.coordinate}`);
   }
 
   function maybeAnnounceHover(message) {
@@ -565,17 +678,14 @@
 
     observedBoardRoots.add(host.shadowRoot);
     const observer = new MutationObserver((records) => {
-      log('board shadow mutation', {
-        hostGameId: host.getAttribute('data-game-id'),
-        records: records.slice(0, 10).map(summarizeMutationRecord)
-      });
+      handleBoardMutationBatch(host, records);
     });
 
     observer.observe(host.shadowRoot, {
       subtree: true,
       childList: true,
       attributes: true,
-      attributeFilter: ['href', 'x', 'y', 'transform', 'class']
+      attributeFilter: ['href', 'x', 'y', 'transform', 'class', 'opacity', 'fill', 'stroke']
     });
 
     log('installBoardMutationObserver', {
@@ -963,11 +1073,402 @@
 
       const col = nearestIndex(svgMetrics.verticals, svgX);
       const row = nearestIndex(svgMetrics.horizontals, svgY);
-      const coordinate = toCoordinate(row, col, svgMetrics.boardSize);
-      lastLoggedCoordinate = coordinate;
-      return coordinate;
+      return toCoordinate(row, col, svgMetrics.boardSize);
     }
     return null;
+  }
+
+  function getBoardMetricsForHost(host) {
+    if (!(host instanceof HTMLElement) || !host.shadowRoot) {
+      return null;
+    }
+
+    const svg = host.shadowRoot.querySelector('svg');
+    if (!(svg instanceof SVGSVGElement)) {
+      return null;
+    }
+
+    const metrics = parseGridMetricsFromSvg(svg);
+    if (!metrics) {
+      return null;
+    }
+
+    setBoardSize(metrics.boardSize);
+    return {
+      svg,
+      metrics
+    };
+  }
+
+  function coordinateFromSvgPoint(metrics, x, y) {
+    if (!metrics || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+
+    const col = nearestIndex(metrics.verticals, x);
+    const row = nearestIndex(metrics.horizontals, y);
+    return toCoordinate(row, col, metrics.boardSize);
+  }
+
+  function collectStoneEntry(node) {
+    if (!(node instanceof SVGUseElement)) {
+      return null;
+    }
+
+    const href = node.getAttribute('href') || node.getAttribute('xlink:href') || '';
+    if (!href) {
+      return null;
+    }
+
+    const point = extractNodePoint(node);
+    return {
+      href,
+      color: parseStoneColorFromHref(href),
+      opacity: parseNumericOpacity(
+        node.getAttribute('opacity') ||
+        window.getComputedStyle(node).opacity
+      ),
+      x: point?.x ?? null,
+      y: point?.y ?? null,
+      key: formatPointKey(point?.x, point?.y)
+    };
+  }
+
+  function collectCircleEntry(node) {
+    if (!(node instanceof SVGCircleElement)) {
+      return null;
+    }
+
+    const point = extractNodePoint(node);
+    return {
+      className: node.getAttribute('class') || '',
+      fill: node.getAttribute('fill') || '',
+      stroke: node.getAttribute('stroke') || '',
+      x: point?.x ?? null,
+      y: point?.y ?? null,
+      key: formatPointKey(point?.x, point?.y)
+    };
+  }
+
+  function collectGridGroupEntry(node) {
+    if (!(node instanceof SVGGElement)) {
+      return null;
+    }
+
+    const parentClassName = node.parentElement?.getAttribute('class') || '';
+    if (parentClassName !== 'grid') {
+      return null;
+    }
+
+    const point = extractNodePoint(node);
+    if (!point) {
+      return null;
+    }
+
+    return {
+      x: point.x,
+      y: point.y,
+      key: formatPointKey(point.x, point.y)
+    };
+  }
+
+  function summarizeMoveBatch(batch) {
+    return {
+      hostGameId: batch.hostGameId,
+      addedGridGroups: batch.addedGridGroups.map((entry) => entry.key),
+      addedOpaqueStones: batch.addedOpaqueStones.map((entry) => ({
+        key: entry.key,
+        color: entry.color
+      })),
+      addedPreviewStones: batch.addedPreviewStones.map((entry) => ({
+        key: entry.key,
+        color: entry.color,
+        opacity: entry.opacity
+      })),
+      removedPreviewStones: batch.removedPreviewStones.map((entry) => ({
+        key: entry.key,
+        color: entry.color,
+        opacity: entry.opacity
+      })),
+      removedOpaqueStones: batch.removedOpaqueStones.map((entry) => ({
+        key: entry.key,
+        color: entry.color
+      })),
+      addedShadowCircles: batch.addedShadowCircles.map((entry) => entry.key),
+      removedShadowCircles: batch.removedShadowCircles.map((entry) => entry.key),
+      addedLastMoveMarkers: batch.addedLastMoveMarkers.length,
+      removedLastMoveMarkers: batch.removedLastMoveMarkers.length,
+      attributeMutations: batch.attributeMutations.length
+    };
+  }
+
+  function normalizeBoardMutationBatch(host, records) {
+    const batch = {
+      hostGameId: host.getAttribute('data-game-id'),
+      addedGridGroups: [],
+      addedOpaqueStones: [],
+      addedPreviewStones: [],
+      removedPreviewStones: [],
+      removedOpaqueStones: [],
+      addedShadowCircles: [],
+      removedShadowCircles: [],
+      addedLastMoveMarkers: [],
+      removedLastMoveMarkers: [],
+      attributeMutations: []
+    };
+
+    for (const record of records) {
+      if (record.type === 'attributes') {
+        batch.attributeMutations.push({
+          tagName: record.target instanceof Element ? record.target.tagName : null,
+          attributeName: record.attributeName || null
+        });
+      }
+
+      for (const node of record.addedNodes) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+
+        const groupEntry = collectGridGroupEntry(node);
+        if (groupEntry) {
+          batch.addedGridGroups.push(groupEntry);
+        }
+
+        const stoneEntry = collectStoneEntry(node);
+        if (stoneEntry) {
+          if (stoneEntry.opacity < 0.99) {
+            batch.addedPreviewStones.push(stoneEntry);
+          } else {
+            batch.addedOpaqueStones.push(stoneEntry);
+          }
+        }
+
+        const circleEntry = collectCircleEntry(node);
+        if (circleEntry) {
+          if (circleEntry.className.includes('last-move')) {
+            batch.addedLastMoveMarkers.push(circleEntry);
+          } else if (circleEntry.fill.includes('shadow')) {
+            batch.addedShadowCircles.push(circleEntry);
+          }
+        }
+      }
+
+      for (const node of record.removedNodes) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+
+        const stoneEntry = collectStoneEntry(node);
+        if (stoneEntry) {
+          if (stoneEntry.opacity < 0.99) {
+            batch.removedPreviewStones.push(stoneEntry);
+          } else {
+            batch.removedOpaqueStones.push(stoneEntry);
+          }
+        }
+
+        const circleEntry = collectCircleEntry(node);
+        if (circleEntry) {
+          if (circleEntry.className.includes('last-move')) {
+            batch.removedLastMoveMarkers.push(circleEntry);
+          } else if (circleEntry.fill.includes('shadow')) {
+            batch.removedShadowCircles.push(circleEntry);
+          }
+        }
+      }
+    }
+
+    return batch;
+  }
+
+  function findCommitPoint(batch) {
+    const candidates = [
+      ...batch.addedShadowCircles,
+      ...batch.addedOpaqueStones,
+      ...batch.addedGridGroups,
+      ...batch.removedPreviewStones
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate?.key) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  function classifyBoardMutationBatch(batch) {
+    const summary = summarizeMoveBatch(batch);
+    const markerOnly =
+      batch.addedGridGroups.length === 0 &&
+      batch.addedOpaqueStones.length === 0 &&
+      batch.addedPreviewStones.length === 0 &&
+      batch.removedPreviewStones.length === 0 &&
+      batch.removedOpaqueStones.length === 0 &&
+      batch.addedShadowCircles.length === 0 &&
+      batch.removedShadowCircles.length === 0 &&
+      (
+        batch.addedLastMoveMarkers.length > 0 ||
+        batch.removedLastMoveMarkers.length > 0 ||
+        batch.attributeMutations.length > 0
+      );
+    if (markerOnly) {
+      return {
+        kind: 'marker-noise',
+        reason: 'marker-only-noise',
+        summary
+      };
+    }
+
+    if (
+      batch.addedPreviewStones.length > 0 &&
+      batch.addedOpaqueStones.length === 0 &&
+      batch.addedShadowCircles.length === 0 &&
+      batch.addedLastMoveMarkers.length === 0 &&
+      batch.removedLastMoveMarkers.length === 0
+    ) {
+      const preview = batch.addedPreviewStones.find((entry) => entry.key) || batch.addedPreviewStones[0];
+      if (preview?.key) {
+        rememberPreview(preview);
+      }
+      return {
+        kind: 'preview',
+        reason: 'translucent-stone-preview',
+        point: preview,
+        summary
+      };
+    }
+
+    const commitPoint = findCommitPoint(batch);
+    const hasOpaqueStone = batch.addedOpaqueStones.length > 0;
+    const commitStone = batch.addedOpaqueStones.find((entry) => entry.key === commitPoint?.key) || batch.addedOpaqueStones[0];
+    const hasShadowCircle = batch.addedShadowCircles.length > 0;
+    const hasMarkerActivity =
+      batch.addedLastMoveMarkers.length > 0 || batch.removedLastMoveMarkers.length > 0;
+    const hasAddedGridGroup = batch.addedGridGroups.length > 0;
+    const removedPreviewAtCommitPoint = commitPoint?.key
+      ? batch.removedPreviewStones.some((entry) => entry.key === commitPoint.key)
+      : false;
+    const recentPreviewAtCommitPoint = commitPoint?.key
+      ? wasRecentPreview(commitPoint.key, commitStone?.color || null)
+      : false;
+
+    if (
+      commitPoint?.key &&
+      hasOpaqueStone &&
+      hasShadowCircle &&
+      hasMarkerActivity &&
+      (removedPreviewAtCommitPoint || recentPreviewAtCommitPoint)
+    ) {
+      return {
+        kind: 'move',
+        source: 'local',
+        reason: removedPreviewAtCommitPoint ? 'preview-promoted-to-local-move' : 'recent-preview-local-move',
+        point: commitPoint,
+        color: commitStone?.color || 'unknown',
+        summary
+      };
+    }
+
+    if (
+      commitPoint?.key &&
+      hasOpaqueStone &&
+      hasAddedGridGroup &&
+      hasMarkerActivity &&
+      !recentPreviewAtCommitPoint
+    ) {
+      return {
+        kind: 'move',
+        source: 'remote',
+        reason: 'remote-committed-move-shape',
+        point: commitPoint,
+        color: commitStone?.color || 'unknown',
+        summary
+      };
+    }
+
+    if (
+      batch.removedPreviewStones.length > 0 &&
+      batch.addedOpaqueStones.length === 0 &&
+      batch.addedShadowCircles.length === 0 &&
+      !hasMarkerActivity
+    ) {
+      return {
+        kind: 'noise',
+        reason: 'preview-removal-noise',
+        summary
+      };
+    }
+
+    return {
+      kind: 'unmatched',
+      reason: 'unmatched-batch-shape',
+      summary
+    };
+  }
+
+  function handleBoardMutationBatch(host, records) {
+    const boardData = getBoardMetricsForHost(host);
+    if (!boardData) {
+      log('move batch unmatched', {
+        reason: 'missing-board-svg-or-metrics',
+        hostGameId: host.getAttribute('data-game-id')
+      });
+      return;
+    }
+
+    const batch = normalizeBoardMutationBatch(host, records);
+    const classification = classifyBoardMutationBatch(batch);
+
+    if (classification.kind === 'preview') {
+      log('move batch classified', {
+        kind: classification.kind,
+        reason: classification.reason,
+        translate: classification.point?.key || null
+      });
+      return;
+    }
+
+    if (classification.kind === 'marker-noise' || classification.kind === 'noise') {
+      log('move batch classified', {
+        kind: classification.kind,
+        reason: classification.reason,
+        summary: classification.summary
+      });
+      return;
+    }
+
+    if (classification.kind === 'unmatched') {
+      log('move batch unmatched', {
+        reason: classification.reason,
+        summary: classification.summary
+      });
+      return;
+    }
+
+    const coordinate = coordinateFromSvgPoint(
+      boardData.metrics,
+      classification.point?.x,
+      classification.point?.y
+    );
+    if (!coordinate) {
+      log('move batch unmatched', {
+        reason: 'could-not-map-point-to-coordinate',
+        summary: classification.summary,
+        point: classification.point?.key || null
+      });
+      return;
+    }
+
+    announceDetectedMove({
+      source: classification.source,
+      color: classification.color || 'unknown',
+      coordinate,
+      translate: classification.point?.key || null,
+      reason: classification.reason
+    });
   }
 
   function maybeRecordBoardSizeFromObject(value) {
@@ -1284,8 +1785,6 @@
 
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
-      } else {
-        announceRemoteMove(coordinate);
       }
     });
   }
@@ -1338,8 +1837,6 @@
       logDetectedMove('raw.move', direction, coordinate, sgfMoveMatch[1]);
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
-      } else {
-        announceRemoteMove(coordinate);
       }
     }
 
@@ -1349,8 +1846,6 @@
       logDetectedMove('raw.xy', direction, coordinate, { x: xyMatch[1], y: xyMatch[2] });
       if (direction === 'outgoing') {
         rememberLocalMove(coordinate);
-      } else {
-        announceRemoteMove(coordinate);
       }
     }
 

@@ -135,3 +135,16 @@ information to tell a transient half-transparent shadow stone from a committed m
 
 The board mutation summaries now include the actual added and removed SVG nodes with tag names, classes, hrefs,
 coordinates, transforms, fill and stroke data, and opacity-related attributes.
+
+## Raw board mutation batches were too noisy to drive rigorous move announcements
+
+Even after the detailed SVG mutation dumps were added, the userscript was still reasoning directly on raw
+`MutationRecord` batches.
+
+That made the move path too loose. Local hover previews, marker-only refreshes, local commit churn, and remote
+commits all came through the same observer, but the code did not have a strict model for which exact batch shapes were
+allowed to count as moves and which ones should be treated as assumption breaks.
+
+The move path now normalizes each mutation batch into stone-render facts, classifies the batch strictly as preview,
+local move, remote move, marker noise, or unmatched, maps committed stone positions through the parsed SVG grid
+metrics, and logs unmatched batch shapes explicitly so the remaining gaps can be debugged without silent fallthrough.
