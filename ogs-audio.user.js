@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.21
+// @version      0.1.22
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.21';
+  const SCRIPT_VERSION = '0.1.22';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -31,6 +31,7 @@
   const recentLocalMoves = [];
   const recentPreviews = new Map();
   const recentMoveDetections = [];
+  let activeBoardHost = null;
   let gobanScanTimerId = null;
   let installedGobanInstrumentation = false;
   const instrumentedObjects = new WeakSet();
@@ -706,11 +707,56 @@
     return null;
   }
 
+  function setActiveBoardHost(host) {
+    if (!(host instanceof HTMLElement) || !host.shadowRoot) {
+      return;
+    }
+
+    activeBoardHost = host;
+  }
+
+  function resolveActiveBoardHost(pointerTarget, clientX, clientY) {
+    const pointerHostCandidates = [];
+    pushShadowHostCandidate(pointerTarget, pointerHostCandidates, 'pointer-target');
+
+    if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof document.elementsFromPoint === 'function') {
+      const stack = document.elementsFromPoint(clientX, clientY);
+      for (let index = 0; index < stack.length; index += 1) {
+        pushShadowHostCandidate(stack[index], pointerHostCandidates, `elementsFromPoint-${index}`);
+      }
+    }
+
+    for (const entry of pointerHostCandidates) {
+      if (entry.host instanceof HTMLElement && entry.host.shadowRoot) {
+        setActiveBoardHost(entry.host);
+        return entry.host;
+      }
+    }
+
+    if (
+      activeBoardHost instanceof HTMLElement &&
+      activeBoardHost.isConnected &&
+      activeBoardHost.shadowRoot
+    ) {
+      return activeBoardHost;
+    }
+
+    const fallbackHost = document.querySelector('.Goban[data-pointers-bound="true"]');
+    if (fallbackHost instanceof HTMLElement && fallbackHost.shadowRoot) {
+      setActiveBoardHost(fallbackHost);
+      return fallbackHost;
+    }
+
+    activeBoardHost = null;
+    return null;
+  }
+
   function installBoardMutationObserver(host) {
     if (!(host instanceof HTMLElement) || !host.shadowRoot || observedBoardRoots.has(host.shadowRoot)) {
       return;
     }
 
+    setActiveBoardHost(host);
     observedBoardRoots.add(host.shadowRoot);
     const observer = new MutationObserver((records) => {
       handleBoardMutationBatch(host, records);
@@ -1067,50 +1113,42 @@
   }
 
   function getHoverAnnouncementFromPoint(clientX, clientY, pointerTarget) {
-    const boardSurface = findBoardSurface(clientX, clientY, pointerTarget);
-    if (!boardSurface) {
+    const activeHost = resolveActiveBoardHost(pointerTarget, clientX, clientY);
+    const activeBoard = activeHost ? getBoardMetricsForHost(activeHost) : null;
+    if (!activeBoard) {
       return null;
     }
 
-    const boardSvg = getPointerBoardSvg(pointerTarget, clientX, clientY, boardSurface);
-    const activeSurface = boardSvg || boardSurface;
-    const rect = activeSurface.getBoundingClientRect();
+    const rect = activeBoard.svg.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       return null;
     }
 
-    const svgMetrics = boardSvg ? parseGridMetricsFromSvg(boardSvg) : null;
-    if (svgMetrics) {
-      setBoardSize(svgMetrics.boardSize);
-      const svgX = svgMetrics.coordinateSpace.x +
-        (clientX - rect.left) * svgMetrics.coordinateSpace.width / rect.width;
-      const svgY = svgMetrics.coordinateSpace.y +
-        (clientY - rect.top) * svgMetrics.coordinateSpace.height / rect.height;
-      const leftBound = svgMetrics.left - svgMetrics.xStep / 2;
-      const rightBound = svgMetrics.right + svgMetrics.xStep / 2;
-      const topBound = svgMetrics.top - svgMetrics.yStep / 2;
-      const bottomBound = svgMetrics.bottom + svgMetrics.yStep / 2;
-      const outsideMessage = getOutsideBoardMessage(
-        svgX - leftBound,
-        svgY - topBound,
-        {
-          width: rightBound - leftBound,
-          height: bottomBound - topBound
-        }
-      );
-      if (outsideMessage) {
-        const hadRecentBoardAnnouncement =
-          lastHoverAnnouncement !== null ||
-          pendingHoverAnnouncement !== null ||
-          activeHoverAnnouncement !== null;
-        return hadRecentBoardAnnouncement ? outsideMessage : null;
+    const svgMetrics = activeBoard.metrics;
+    setBoardSize(svgMetrics.boardSize);
+    const svgX = svgMetrics.coordinateSpace.x +
+      (clientX - rect.left) * svgMetrics.coordinateSpace.width / rect.width;
+    const svgY = svgMetrics.coordinateSpace.y +
+      (clientY - rect.top) * svgMetrics.coordinateSpace.height / rect.height;
+    const leftBound = svgMetrics.left - svgMetrics.xStep / 2;
+    const rightBound = svgMetrics.right + svgMetrics.xStep / 2;
+    const topBound = svgMetrics.top - svgMetrics.yStep / 2;
+    const bottomBound = svgMetrics.bottom + svgMetrics.yStep / 2;
+    const outsideMessage = getOutsideBoardMessage(
+      svgX - leftBound,
+      svgY - topBound,
+      {
+        width: rightBound - leftBound,
+        height: bottomBound - topBound
       }
-
-      const col = nearestIndex(svgMetrics.verticals, svgX);
-      const row = nearestIndex(svgMetrics.horizontals, svgY);
-      return toCoordinate(row, col, svgMetrics.boardSize);
+    );
+    if (outsideMessage) {
+      return outsideMessage;
     }
-    return null;
+
+    const col = nearestIndex(svgMetrics.verticals, svgX);
+    const row = nearestIndex(svgMetrics.horizontals, svgY);
+    return toCoordinate(row, col, svgMetrics.boardSize);
   }
 
   function getBoardMetricsForHost(host) {

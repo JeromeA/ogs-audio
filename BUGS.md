@@ -258,3 +258,16 @@ that had lost their board coordinates.
 
 The classifier now treats that pattern as `detached-cleanup-noise` instead of unmatched, which keeps the logs focused
 on genuinely new or genuinely unexplained move shapes.
+
+## Off-board edge guidance stopped once the pointer moved too far from the board
+
+The cursor-audio feature could say "Past the left edge" and similar messages only while the pointer was still near the
+board.
+
+That happened because outside-board guidance depended on first rediscovering the board under or near the current
+pointer position. Once the pointer moved farther away, board lookup failed and the whole hover path returned `null`.
+The code also suppressed edge messages unless there had already been a recent on-board announcement.
+
+The hover path now keeps a persistent active board host once the board has been discovered, reuses that cached board
+for later pointer moves anywhere on the page, and allows edge guidance from that cached board without requiring a
+recent on-board announcement.
