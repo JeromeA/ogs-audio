@@ -246,3 +246,15 @@ through to the remote branch.
 
 The preview cache now stores previews by normalized board intersection, matching the key the classifier uses during the
 commit check.
+
+## Detached cleanup churn after a committed move still appeared as unmatched
+
+After a local move was correctly detected and later refresh passes were deduped, one final observer batch could still
+be logged as `unmatched-batch-shape`.
+
+That batch contained only detached removals of an opaque stone and a shadow circle with unusable `0,0` geometry, plus
+last-move marker churn. In other words, it was not a real move shape at all, only cleanup of already-rendered nodes
+that had lost their board coordinates.
+
+The classifier now treats that pattern as `detached-cleanup-noise` instead of unmatched, which keeps the logs focused
+on genuinely new or genuinely unexplained move shapes.
