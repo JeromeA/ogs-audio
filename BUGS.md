@@ -148,3 +148,15 @@ allowed to count as moves and which ones should be treated as assumption breaks.
 The move path now normalizes each mutation batch into stone-render facts, classifies the batch strictly as preview,
 local move, remote move, marker noise, or unmatched, maps committed stone positions through the parsed SVG grid
 metrics, and logs unmatched batch shapes explicitly so the remaining gaps can be debugged without silent fallthrough.
+
+## Empty normalized board batches were still being logged as unmatched moves
+
+After the strict move classifier was added, the board observer could still emit `move batch unmatched` during page
+startup even before any moves were played.
+
+Those logs came from mutation callbacks whose raw DOM changes were real, but whose normalized stone-render summary was
+completely empty. In other words, they were irrelevant board churn, not a broken classifier assumption.
+
+The move path now drops empty normalized batches before classification, so startup noise does not appear as a false
+unmatched move. The simple startup logs were also changed to plain-text messages so the installed version and observed
+game id are visible without expanding console objects.

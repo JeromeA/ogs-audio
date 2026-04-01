@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.13
+// @version      0.1.14
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.13';
+  const SCRIPT_VERSION = '0.1.14';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -688,10 +688,10 @@
       attributeFilter: ['href', 'x', 'y', 'transform', 'class', 'opacity', 'fill', 'stroke']
     });
 
-    log('installBoardMutationObserver', {
-      gameId: host.getAttribute('data-game-id'),
-      className: String(host.className || '')
-    });
+    log(
+      `installBoardMutationObserver gameId=${host.getAttribute('data-game-id') || 'unknown'} ` +
+      `class=${String(host.className || '')}`
+    );
   }
 
   function collectBoardSvgCandidates(source, list, reason) {
@@ -1202,6 +1202,21 @@
     };
   }
 
+  function isEmptyMoveBatch(batch) {
+    return (
+      batch.addedGridGroups.length === 0 &&
+      batch.addedOpaqueStones.length === 0 &&
+      batch.addedPreviewStones.length === 0 &&
+      batch.removedPreviewStones.length === 0 &&
+      batch.removedOpaqueStones.length === 0 &&
+      batch.addedShadowCircles.length === 0 &&
+      batch.removedShadowCircles.length === 0 &&
+      batch.addedLastMoveMarkers.length === 0 &&
+      batch.removedLastMoveMarkers.length === 0 &&
+      batch.attributeMutations.length === 0
+    );
+  }
+
   function normalizeBoardMutationBatch(host, records) {
     const batch = {
       hostGameId: host.getAttribute('data-game-id'),
@@ -1420,6 +1435,10 @@
     }
 
     const batch = normalizeBoardMutationBatch(host, records);
+    if (isEmptyMoveBatch(batch)) {
+      return;
+    }
+
     const classification = classifyBoardMutationBatch(batch);
 
     if (classification.kind === 'preview') {
@@ -2029,6 +2048,6 @@
   installFetchHook();
   installXhrHook();
   installPointerHook();
-  log('script boot', { version: SCRIPT_VERSION });
+  log(`script boot version=${SCRIPT_VERSION}`);
   startGobanInstrumentationScan();
 })();
