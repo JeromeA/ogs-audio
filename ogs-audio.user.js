@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.14
+// @version      0.1.15
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.14';
+  const SCRIPT_VERSION = '0.1.15';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -1110,6 +1110,25 @@
     return toCoordinate(row, col, metrics.boardSize);
   }
 
+  function normalizeEntryToBoardIntersection(metrics, entry, options = {}) {
+    if (!entry) {
+      return entry;
+    }
+
+    const rejectOrigin = options.rejectOrigin === true;
+    const hasPoint = Number.isFinite(entry.x) && Number.isFinite(entry.y);
+    const unusableOrigin = rejectOrigin && entry.x === 0 && entry.y === 0;
+    const coordinate = hasPoint && !unusableOrigin
+      ? coordinateFromSvgPoint(metrics, entry.x, entry.y)
+      : null;
+
+    return {
+      ...entry,
+      coordinate,
+      intersectionKey: coordinate
+    };
+  }
+
   function collectStoneEntry(node) {
     if (!(node instanceof SVGUseElement)) {
       return null;
@@ -1175,27 +1194,40 @@
   function summarizeMoveBatch(batch) {
     return {
       hostGameId: batch.hostGameId,
-      addedGridGroups: batch.addedGridGroups.map((entry) => entry.key),
+      addedGridGroups: batch.addedGridGroups.map((entry) => ({
+        key: entry.key,
+        coordinate: entry.coordinate
+      })),
       addedOpaqueStones: batch.addedOpaqueStones.map((entry) => ({
         key: entry.key,
+        coordinate: entry.coordinate,
         color: entry.color
       })),
       addedPreviewStones: batch.addedPreviewStones.map((entry) => ({
         key: entry.key,
+        coordinate: entry.coordinate,
         color: entry.color,
         opacity: entry.opacity
       })),
       removedPreviewStones: batch.removedPreviewStones.map((entry) => ({
         key: entry.key,
+        coordinate: entry.coordinate,
         color: entry.color,
         opacity: entry.opacity
       })),
       removedOpaqueStones: batch.removedOpaqueStones.map((entry) => ({
         key: entry.key,
+        coordinate: entry.coordinate,
         color: entry.color
       })),
-      addedShadowCircles: batch.addedShadowCircles.map((entry) => entry.key),
-      removedShadowCircles: batch.removedShadowCircles.map((entry) => entry.key),
+      addedShadowCircles: batch.addedShadowCircles.map((entry) => ({
+        key: entry.key,
+        coordinate: entry.coordinate
+      })),
+      removedShadowCircles: batch.removedShadowCircles.map((entry) => ({
+        key: entry.key,
+        coordinate: entry.coordinate
+      })),
       addedLastMoveMarkers: batch.addedLastMoveMarkers.length,
       removedLastMoveMarkers: batch.removedLastMoveMarkers.length,
       attributeMutations: batch.attributeMutations.length
@@ -1217,7 +1249,7 @@
     );
   }
 
-  function normalizeBoardMutationBatch(host, records) {
+  function normalizeBoardMutationBatch(host, records, metrics) {
     const batch = {
       hostGameId: host.getAttribute('data-game-id'),
       addedGridGroups: [],
@@ -1247,24 +1279,26 @@
 
         const groupEntry = collectGridGroupEntry(node);
         if (groupEntry) {
-          batch.addedGridGroups.push(groupEntry);
+          batch.addedGridGroups.push(normalizeEntryToBoardIntersection(metrics, groupEntry));
         }
 
         const stoneEntry = collectStoneEntry(node);
         if (stoneEntry) {
+          const normalizedStoneEntry = normalizeEntryToBoardIntersection(metrics, stoneEntry);
           if (stoneEntry.opacity < 0.99) {
-            batch.addedPreviewStones.push(stoneEntry);
+            batch.addedPreviewStones.push(normalizedStoneEntry);
           } else {
-            batch.addedOpaqueStones.push(stoneEntry);
+            batch.addedOpaqueStones.push(normalizedStoneEntry);
           }
         }
 
         const circleEntry = collectCircleEntry(node);
         if (circleEntry) {
+          const normalizedCircleEntry = normalizeEntryToBoardIntersection(metrics, circleEntry);
           if (circleEntry.className.includes('last-move')) {
-            batch.addedLastMoveMarkers.push(circleEntry);
+            batch.addedLastMoveMarkers.push(normalizedCircleEntry);
           } else if (circleEntry.fill.includes('shadow')) {
-            batch.addedShadowCircles.push(circleEntry);
+            batch.addedShadowCircles.push(normalizedCircleEntry);
           }
         }
       }
@@ -1276,19 +1310,21 @@
 
         const stoneEntry = collectStoneEntry(node);
         if (stoneEntry) {
+          const normalizedStoneEntry = normalizeEntryToBoardIntersection(metrics, stoneEntry, { rejectOrigin: true });
           if (stoneEntry.opacity < 0.99) {
-            batch.removedPreviewStones.push(stoneEntry);
+            batch.removedPreviewStones.push(normalizedStoneEntry);
           } else {
-            batch.removedOpaqueStones.push(stoneEntry);
+            batch.removedOpaqueStones.push(normalizedStoneEntry);
           }
         }
 
         const circleEntry = collectCircleEntry(node);
         if (circleEntry) {
+          const normalizedCircleEntry = normalizeEntryToBoardIntersection(metrics, circleEntry, { rejectOrigin: true });
           if (circleEntry.className.includes('last-move')) {
-            batch.removedLastMoveMarkers.push(circleEntry);
+            batch.removedLastMoveMarkers.push(normalizedCircleEntry);
           } else if (circleEntry.fill.includes('shadow')) {
-            batch.removedShadowCircles.push(circleEntry);
+            batch.removedShadowCircles.push(normalizedCircleEntry);
           }
         }
       }
@@ -1299,14 +1335,14 @@
 
   function findCommitPoint(batch) {
     const candidates = [
-      ...batch.addedShadowCircles,
       ...batch.addedOpaqueStones,
+      ...batch.addedShadowCircles,
       ...batch.addedGridGroups,
       ...batch.removedPreviewStones
     ];
 
     for (const candidate of candidates) {
-      if (candidate?.key) {
+      if (candidate?.intersectionKey) {
         return candidate;
       }
     }
@@ -1344,8 +1380,8 @@
       batch.addedLastMoveMarkers.length === 0 &&
       batch.removedLastMoveMarkers.length === 0
     ) {
-      const preview = batch.addedPreviewStones.find((entry) => entry.key) || batch.addedPreviewStones[0];
-      if (preview?.key) {
+      const preview = batch.addedPreviewStones.find((entry) => entry.intersectionKey) || batch.addedPreviewStones[0];
+      if (preview?.intersectionKey) {
         rememberPreview(preview);
       }
       return {
@@ -1358,24 +1394,32 @@
 
     const commitPoint = findCommitPoint(batch);
     const hasOpaqueStone = batch.addedOpaqueStones.length > 0;
-    const commitStone = batch.addedOpaqueStones.find((entry) => entry.key === commitPoint?.key) || batch.addedOpaqueStones[0];
+    const commitStone = batch.addedOpaqueStones.find(
+      (entry) => entry.intersectionKey === commitPoint?.intersectionKey
+    ) || batch.addedOpaqueStones[0];
     const hasShadowCircle = batch.addedShadowCircles.length > 0;
     const hasMarkerActivity =
       batch.addedLastMoveMarkers.length > 0 || batch.removedLastMoveMarkers.length > 0;
     const hasAddedGridGroup = batch.addedGridGroups.length > 0;
-    const removedPreviewAtCommitPoint = commitPoint?.key
-      ? batch.removedPreviewStones.some((entry) => entry.key === commitPoint.key)
+    const removedPreviewAtCommitPoint = commitPoint?.intersectionKey
+      ? batch.removedPreviewStones.some((entry) => entry.intersectionKey === commitPoint.intersectionKey)
       : false;
-    const recentPreviewAtCommitPoint = commitPoint?.key
-      ? wasRecentPreview(commitPoint.key, commitStone?.color || null)
+    const recentPreviewAtCommitPoint = commitPoint?.intersectionKey
+      ? wasRecentPreview(commitPoint.intersectionKey, commitStone?.color || null)
+      : false;
+    const shadowCircleAtCommitPoint = commitPoint?.intersectionKey
+      ? batch.addedShadowCircles.some((entry) => entry.intersectionKey === commitPoint.intersectionKey)
+      : false;
+    const gridGroupAtCommitPoint = commitPoint?.intersectionKey
+      ? batch.addedGridGroups.some((entry) => entry.intersectionKey === commitPoint.intersectionKey)
       : false;
 
     if (
-      commitPoint?.key &&
+      commitPoint?.intersectionKey &&
       hasOpaqueStone &&
       hasShadowCircle &&
       hasMarkerActivity &&
-      (removedPreviewAtCommitPoint || recentPreviewAtCommitPoint)
+      (removedPreviewAtCommitPoint || recentPreviewAtCommitPoint || shadowCircleAtCommitPoint)
     ) {
       return {
         kind: 'move',
@@ -1388,9 +1432,9 @@
     }
 
     if (
-      commitPoint?.key &&
+      commitPoint?.intersectionKey &&
       hasOpaqueStone &&
-      hasAddedGridGroup &&
+      (hasAddedGridGroup || gridGroupAtCommitPoint || shadowCircleAtCommitPoint) &&
       hasMarkerActivity &&
       !recentPreviewAtCommitPoint
     ) {
@@ -1434,7 +1478,7 @@
       return;
     }
 
-    const batch = normalizeBoardMutationBatch(host, records);
+    const batch = normalizeBoardMutationBatch(host, records, boardData.metrics);
     if (isEmptyMoveBatch(batch)) {
       return;
     }

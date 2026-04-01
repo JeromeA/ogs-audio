@@ -160,3 +160,17 @@ completely empty. In other words, they were irrelevant board churn, not a broken
 The move path now drops empty normalized batches before classification, so startup noise does not appear as a false
 unmatched move. The simple startup logs were also changed to plain-text messages so the installed version and observed
 game id are visible without expanding console objects.
+
+## Local move batches mixed incompatible SVG point conventions
+
+The first strict local-move classifier compared raw SVG point keys from preview stones, opaque stones, and shadow
+circles as if they all represented the same anchor point.
+
+In practice, local click batches mix different point conventions. Added opaque stones and shadow circles can resolve to
+different raw SVG coordinates for the same board intersection, while detached removed preview nodes can collapse to
+`0,0`. That made real local moves fall into `unmatched-batch-shape` even though the classifier was seeing the right
+nodes.
+
+The move path now normalizes stone, grid-group, and shadow-circle entries to the nearest board intersection using the
+parsed SVG grid metrics, matches local commits on that normalized board coordinate, and treats removed-node origin
+points like `0,0` as unusable rather than trustworthy move geometry.
