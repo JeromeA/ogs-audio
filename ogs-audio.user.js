@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.19
+// @version      0.1.20
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.19';
+  const SCRIPT_VERSION = '0.1.20';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -354,12 +354,12 @@
   }
 
   function rememberPreview(entry) {
-    if (!entry?.key) {
+    if (!entry?.intersectionKey) {
       return;
     }
 
     const now = Date.now();
-    recentPreviews.set(entry.key, {
+    recentPreviews.set(entry.intersectionKey, {
       at: now,
       color: entry.color,
       x: entry.x,

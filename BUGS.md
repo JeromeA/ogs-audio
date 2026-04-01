@@ -233,3 +233,16 @@ speech color made reload announcements say the wrong color.
 The move classifier now prefers the last-move marker stroke to infer color. A white marker stroke implies a black
 stone underneath, and a black marker stroke implies a white stone underneath. The shell href color is now only a
 fallback and debug aid when marker evidence is absent.
+
+## Preview memory used raw SVG point keys while the classifier queried board intersections
+
+The local click path relied on remembering a recent preview and then recognizing the committed move at the same board
+intersection.
+
+But the preview cache stored entries under the raw SVG point key such as `648.5,1120.5`, while the classifier later
+looked them up using the normalized board intersection such as `E1`. That made `recentPreviewAtCommitPoint` false even
+when the preview and the committed move were on the same intersection, which in turn let some local moves fall
+through to the remote branch.
+
+The preview cache now stores previews by normalized board intersection, matching the key the classifier uses during the
+commit check.
