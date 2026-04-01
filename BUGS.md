@@ -198,3 +198,26 @@ not specific to local moves at all.
 The local predicate now requires actual preview evidence only: either a removed preview at the committed intersection
 or a recent preview remembered for that same intersection. Shadow circles remain part of the observed rendering, but
 they no longer force the local branch by themselves.
+
+## Remote and reload detections were still populating local move memory
+
+While reloading a game with existing moves, the logs still showed `rememberLocalMove` for the current board state even
+though the move had been classified as remote.
+
+That was semantically wrong. Remote or reload detections should not populate the local move memory that is meant to
+suppress re-announcing the user's own just-played move.
+
+The payload and raw-text analyzers already limited `rememberLocalMove` to outgoing traffic, but the higher-level
+`announceDetectedMove` path was still recording every detected move as local. It now only records moves whose source is
+actually `local`.
+
+## Color debugging needed the actual stone candidates, not just the chosen result
+
+When a reload correctly classified the last move as remote but assigned the wrong color, the logs showed only the
+chosen `commitStoneColor`.
+
+That still hid the key question: whether the parser had chosen the wrong stone node from the batch or whether it had
+parsed the chosen stone's href incorrectly.
+
+The move-detection evidence now includes the chosen stone href and the full list of opaque stone candidates in the
+batch, each with href, parsed color, raw point key, and normalized board coordinate.

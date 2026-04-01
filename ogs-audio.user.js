@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.17
+// @version      0.1.18
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.17';
+  const SCRIPT_VERSION = '0.1.18';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -409,6 +409,20 @@
     };
   }
 
+  function summarizeStoneCandidate(entry) {
+    if (!entry) {
+      return null;
+    }
+
+    return {
+      href: entry.href || null,
+      color: entry.color || 'unknown',
+      key: entry.key || null,
+      coordinate: entry.coordinate || null,
+      intersectionKey: entry.intersectionKey || null
+    };
+  }
+
   function announceDetectedMove(move) {
     if (!move?.coordinate) {
       return;
@@ -421,7 +435,9 @@
     }
 
     rememberDetectedMove(moveKey);
-    rememberLocalMove(move.coordinate);
+    if (move.source === 'local') {
+      rememberLocalMove(move.coordinate);
+    }
     log('move detected', describeDetectedMove(move));
 
     const colorWord = move.color === 'unknown'
@@ -1417,6 +1433,7 @@
     const decisionEvidence = {
       commitIntersection: commitPoint?.intersectionKey || null,
       commitPointKey: commitPoint?.key || null,
+      commitStoneHref: commitStone?.href || null,
       hasOpaqueStone,
       hasShadowCircle,
       hasMarkerActivity,
@@ -1425,7 +1442,8 @@
       recentPreviewAtCommitPoint,
       shadowCircleAtCommitPoint,
       gridGroupAtCommitPoint,
-      commitStoneColor: commitStone?.color || 'unknown'
+      commitStoneColor: commitStone?.color || 'unknown',
+      opaqueStoneCandidates: batch.addedOpaqueStones.map(summarizeStoneCandidate)
     };
 
     if (
