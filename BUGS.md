@@ -174,3 +174,14 @@ nodes.
 The move path now normalizes stone, grid-group, and shadow-circle entries to the nearest board intersection using the
 parsed SVG grid metrics, matches local commits on that normalized board coordinate, and treats removed-node origin
 points like `0,0` as unusable rather than trustworthy move geometry.
+
+## Move-detection logs did not expose the actual classifier evidence
+
+When a remote move was unexpectedly classified as local, the console output showed only the final label and reason.
+
+That proved the misclassification happened, but it did not show which predicates were true inside the classifier, such
+as whether a recent preview match or a grid-group match triggered the wrong branch. Debugging then depended on manual
+console expansion and still left some decision inputs implicit.
+
+The move-detection log now includes the classifier evidence directly in each `move detected` record, including the
+chosen intersection, the raw point key, and the booleans that decided between the local and remote branches.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.15
+// @version      0.1.16
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.15';
+  const SCRIPT_VERSION = '0.1.16';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -404,7 +404,8 @@
       color: move.color,
       coordinate: move.coordinate,
       translate: move.translate,
-      reason: move.reason
+      reason: move.reason,
+      evidence: move.evidence
     };
   }
 
@@ -1413,6 +1414,19 @@
     const gridGroupAtCommitPoint = commitPoint?.intersectionKey
       ? batch.addedGridGroups.some((entry) => entry.intersectionKey === commitPoint.intersectionKey)
       : false;
+    const decisionEvidence = {
+      commitIntersection: commitPoint?.intersectionKey || null,
+      commitPointKey: commitPoint?.key || null,
+      hasOpaqueStone,
+      hasShadowCircle,
+      hasMarkerActivity,
+      hasAddedGridGroup,
+      removedPreviewAtCommitPoint,
+      recentPreviewAtCommitPoint,
+      shadowCircleAtCommitPoint,
+      gridGroupAtCommitPoint,
+      commitStoneColor: commitStone?.color || 'unknown'
+    };
 
     if (
       commitPoint?.intersectionKey &&
@@ -1427,7 +1441,8 @@
         reason: removedPreviewAtCommitPoint ? 'preview-promoted-to-local-move' : 'recent-preview-local-move',
         point: commitPoint,
         color: commitStone?.color || 'unknown',
-        summary
+        summary,
+        evidence: decisionEvidence
       };
     }
 
@@ -1444,7 +1459,8 @@
         reason: 'remote-committed-move-shape',
         point: commitPoint,
         color: commitStone?.color || 'unknown',
-        summary
+        summary,
+        evidence: decisionEvidence
       };
     }
 
@@ -1530,7 +1546,8 @@
       color: classification.color || 'unknown',
       coordinate,
       translate: classification.point?.key || null,
-      reason: classification.reason
+      reason: classification.reason,
+      evidence: classification.evidence
     });
   }
 
