@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGS Blind Audio
 // @namespace    https://online-go.com/
-// @version      0.1.18
+// @version      0.1.19
 // @description  Speak opponent moves and hovered board coordinates on OGS.
 // @match        https://online-go.com/*
 // @match        https://beta.online-go.com/*
@@ -20,7 +20,7 @@
   const LOG_PREFIX = '[ogs-audio]';
   const DEBUG_LOGGING = true;
   const GOBAN_SCAN_INTERVAL_MS = 1000;
-  const SCRIPT_VERSION = '0.1.18';
+  const SCRIPT_VERSION = '0.1.19';
 
   let boardSize = null;
   let lastHoverAnnouncement = null;
@@ -421,6 +421,24 @@
       coordinate: entry.coordinate || null,
       intersectionKey: entry.intersectionKey || null
     };
+  }
+
+  function inferColorFromMarkerStroke(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return 'unknown';
+    }
+
+    for (const entry of entries) {
+      const stroke = String(entry?.stroke || '').toLowerCase();
+      if (stroke === '#ffffff' || stroke === 'white' || stroke === 'rgb(255, 255, 255)') {
+        return 'black';
+      }
+      if (stroke === '#000000' || stroke === 'black' || stroke === 'rgb(0, 0, 0)') {
+        return 'white';
+      }
+    }
+
+    return 'unknown';
   }
 
   function announceDetectedMove(move) {
@@ -1430,10 +1448,16 @@
     const gridGroupAtCommitPoint = commitPoint?.intersectionKey
       ? batch.addedGridGroups.some((entry) => entry.intersectionKey === commitPoint.intersectionKey)
       : false;
+    const markerInferredColor = inferColorFromMarkerStroke(batch.addedLastMoveMarkers);
+    const resolvedCommitColor = markerInferredColor !== 'unknown'
+      ? markerInferredColor
+      : (commitStone?.color || 'unknown');
     const decisionEvidence = {
       commitIntersection: commitPoint?.intersectionKey || null,
       commitPointKey: commitPoint?.key || null,
       commitStoneHref: commitStone?.href || null,
+      markerInferredColor,
+      resolvedCommitColor,
       hasOpaqueStone,
       hasShadowCircle,
       hasMarkerActivity,
@@ -1443,7 +1467,8 @@
       shadowCircleAtCommitPoint,
       gridGroupAtCommitPoint,
       commitStoneColor: commitStone?.color || 'unknown',
-      opaqueStoneCandidates: batch.addedOpaqueStones.map(summarizeStoneCandidate)
+      opaqueStoneCandidates: batch.addedOpaqueStones.map(summarizeStoneCandidate),
+      addedLastMoveMarkerStrokes: batch.addedLastMoveMarkers.map((entry) => entry.stroke || '')
     };
 
     if (
@@ -1458,7 +1483,7 @@
         source: 'local',
         reason: removedPreviewAtCommitPoint ? 'preview-promoted-to-local-move' : 'recent-preview-local-move',
         point: commitPoint,
-        color: commitStone?.color || 'unknown',
+        color: resolvedCommitColor,
         summary,
         evidence: decisionEvidence
       };
@@ -1476,7 +1501,7 @@
         source: 'remote',
         reason: 'remote-committed-move-shape',
         point: commitPoint,
-        color: commitStone?.color || 'unknown',
+        color: resolvedCommitColor,
         summary,
         evidence: decisionEvidence
       };

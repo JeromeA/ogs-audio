@@ -221,3 +221,15 @@ parsed the chosen stone's href incorrectly.
 
 The move-detection evidence now includes the chosen stone href and the full list of opaque stone candidates in the
 batch, each with href, parsed color, raw point key, and normalized board coordinate.
+
+## Shell asset names did not reliably encode the played stone color
+
+After the opaque stone candidates were logged, reload batches showed multiple stones named like `#white-shell-*` even
+though only one of those stones was actually white and the current last move could be black.
+
+That means the shell asset name is a rendering-style identifier, not a trustworthy color signal. Using it directly for
+speech color made reload announcements say the wrong color.
+
+The move classifier now prefers the last-move marker stroke to infer color. A white marker stroke implies a black
+stone underneath, and a black marker stroke implies a white stone underneath. The shell href color is now only a
+fallback and debug aid when marker evidence is absent.
