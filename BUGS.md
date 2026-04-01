@@ -185,3 +185,16 @@ console expansion and still left some decision inputs implicit.
 
 The move-detection log now includes the classifier evidence directly in each `move detected` record, including the
 chosen intersection, the raw point key, and the booleans that decided between the local and remote branches.
+
+## The local move rule treated shadow circles as local-only evidence
+
+After classifier evidence was logged, a remote move was shown matching the local branch even though there was no
+removed preview and no recent preview at the committed intersection.
+
+The deciding mistake was that the local predicate accepted `shadowCircleAtCommitPoint` as if it were evidence of a
+local click. But remote committed moves can also add a shadow circle at the played intersection, so that condition was
+not specific to local moves at all.
+
+The local predicate now requires actual preview evidence only: either a removed preview at the committed intersection
+or a recent preview remembered for that same intersection. Shadow circles remain part of the observed rendering, but
+they no longer force the local branch by themselves.
